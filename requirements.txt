@@ -1,0 +1,14 @@
+# ERP 資料備份系統 - Python 依賴套件
+
+# HTTP 請求處理
+requests>=2.31.0
+
+# Google Cloud 服務
+google-cloud-bigquery>=3.11.0
+google-cloud-logging>=3.8.0
+
+# 型別註解支援 (Python < 3.9)
+typing-extensions>=4.7.0
+
+# 電子郵件功能 (內建於 Python 標準庫)
+# smtplib, email.mime - 無需額外安裝
