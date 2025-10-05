@@ -6,6 +6,7 @@ BigQuery 上傳模組
 
 import logging
 import datetime
+import uuid
 from typing import List, Dict, Any, Optional, Tuple
 from google.cloud import bigquery
 from google.cloud.exceptions import NotFound, Conflict
@@ -43,7 +44,11 @@ class BigQueryUploader:
                    dataset_id: str,
                    table_id: str,
                    schema: Optional[List[bigquery.SchemaField]] = None,
-                   use_merge: bool = True) -> Dict[str, Any]:
+                   use_merge: bool = True,
+                   upload_mode: str = "auto",
+                   batch_threshold: int = 5000,
+                   staging_table: Optional[str] = None,
+                   merge_sp_name: Optional[str] = None) -> Dict[str, Any]:
         """
         上傳資料至 BigQuery
 
@@ -75,14 +80,27 @@ class BigQueryUploader:
         start_time = datetime.datetime.now()
 
         try:
-            # 確保資料集和資料表存在
-            table_ref = self._ensure_table_exists(dataset_id, table_id, schema)
+            # 直送或 staging+SP 決策
+            mode = (upload_mode or "auto").lower()
 
-            # 執行上傳
-            if use_merge:
-                result = self._upload_with_merge(data, table_ref, schema)
+            if mode == "staging_sp" or (mode == "auto" and len(data) > batch_threshold):
+                # 使用 staging + 預儲程序
+                st_table = staging_table or f"{table_id}_staging"
+                result = self._upload_via_staging(
+                    data=data,
+                    dataset_id=dataset_id,
+                    target_table_id=table_id,
+                    staging_table_id=st_table,
+                    base_schema=schema,
+                    merge_sp_name=merge_sp_name
+                )
             else:
-                result = self._upload_with_insert(data, table_ref, schema)
+                # 直送（MERGE / INSERT）
+                table_ref = self._ensure_table_exists(dataset_id, table_id, schema)
+                if use_merge:
+                    result = self._upload_with_merge(data, table_ref, schema)
+                else:
+                    result = self._upload_with_insert(data, table_ref, schema)
 
             end_time = datetime.datetime.now()
             duration = (end_time - start_time).total_seconds()
@@ -163,6 +181,120 @@ class BigQueryUploader:
             except Exception as e:
                 raise Exception(f"建立資料集失敗: {e}")
 
+    def _project_records_to_schema(self, data: List[Dict[str, Any]], schema: List[bigquery.SchemaField]) -> List[Dict[str, Any]]:
+        """
+        僅保留 schema 中定義的欄位，避免 BigQuery 載入時出現未知欄位錯誤
+        """
+        allowed = {f.name for f in schema}
+        projected: List[Dict[str, Any]] = []
+        for rec in data:
+            filtered = {k: v for k, v in rec.items() if k in allowed}
+            projected.append(filtered)
+        return projected
+
+    def _get_staging_schema(self, base_schema: List[bigquery.SchemaField]) -> List[bigquery.SchemaField]:
+        """
+        取得 staging 表的 Schema：在基底 schema 基礎上，額外附加批次欄位
+
+        Args:
+            base_schema: 目標表的 BigQuery 架構
+
+        Returns:
+            List[bigquery.SchemaField]: staging 架構
+        """
+        field_names = {f.name for f in base_schema}
+        staging_schema = list(base_schema)
+
+        if 'batch_id' not in field_names:
+            staging_schema.append(bigquery.SchemaField('batch_id', 'STRING'))
+        if 'ingested_at' not in field_names:
+            staging_schema.append(bigquery.SchemaField('ingested_at', 'TIMESTAMP'))
+
+        return staging_schema
+
+    def _resolve_sp_fqn(self, merge_sp_name: Optional[str], dataset_id: str) -> str:
+        """
+        解析預儲程序全名
+
+        規則：
+        - 若 merge_sp_name 含兩個點（project.dataset.proc），視為完整名稱
+        - 若只含一個點（dataset.proc），自動補上本專案 ID
+        - 若不含點，補上本專案與目前 dataset
+        """
+        if not merge_sp_name:
+            # 預設名稱
+            sp = 'sp_upsert_ragic_data'
+        else:
+            sp = merge_sp_name
+
+        if sp.count('.') == 2:
+            return sp
+        elif sp.count('.') == 1:
+            # dataset.proc
+            return f"{self.project_id}.{sp}"
+        else:
+            # proc
+            return f"{self.project_id}.{dataset_id}.{sp}"
+
+    def _upload_via_staging(self,
+                            data: List[Dict[str, Any]],
+                            dataset_id: str,
+                            target_table_id: str,
+                            staging_table_id: str,
+                            base_schema: List[bigquery.SchemaField],
+                            merge_sp_name: Optional[str]) -> Dict[str, Any]:
+        """
+        透過 staging 表 + 預儲程序進行上傳（高吞吐、安全）
+        """
+        logging.info(f"使用 staging+SP 上傳 {len(data)} 筆資料 → staging 表: {staging_table_id}")
+
+        # 生成批次 ID 與時間戳
+        batch_id = f"{datetime.datetime.utcnow().strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:8]}"
+        ingested_at = datetime.datetime.utcnow().isoformat()
+
+        # 準備 staging schema 與資料
+        staging_schema = self._get_staging_schema(base_schema)
+        staging_table_ref = self._ensure_table_exists(dataset_id, staging_table_id, staging_schema)
+
+        # 附加批次欄位
+        payload = []
+        for item in data:
+            enriched = dict(item)
+            enriched['batch_id'] = batch_id
+            enriched['ingested_at'] = ingested_at
+            payload.append(enriched)
+
+        # 載入至 staging（Append）
+        job_config = bigquery.LoadJobConfig(
+            schema=staging_schema,
+            write_disposition=bigquery.WriteDisposition.WRITE_APPEND
+        )
+        load_job = self.client.load_table_from_json(payload, staging_table_ref, job_config=job_config)
+        load_job.result()
+        if load_job.errors:
+            raise Exception(f"載入 staging 失敗: {load_job.errors}")
+
+        # 呼叫預儲程序執行 MERGE（在 BQ 端完成 Upsert / 清理 / 審計）
+        sp_fqn = self._resolve_sp_fqn(merge_sp_name, dataset_id)
+        logging.info(f"呼叫預儲程序: {sp_fqn} (batch_id={batch_id})")
+
+        call_query = f"CALL `{sp_fqn}`(@batch_id)"
+        qparams = [bigquery.ScalarQueryParameter('batch_id', 'STRING', batch_id)]
+        qcfg = bigquery.QueryJobConfig(query_parameters=qparams, job_timeout_ms=600000)
+        qjob = self.client.query(call_query, job_config=qcfg)
+        qjob.result()
+        if qjob.errors:
+            raise Exception(f"預儲程序呼叫失敗: {qjob.errors}")
+
+        return {
+            "status": "success",
+            "method": "staging_sp",
+            "records_processed": len(data),
+            "batch_id": batch_id,
+            "staging_table": staging_table_id,
+            "stored_procedure": sp_fqn
+        }
+
     def _upload_with_merge(self,
                           data: List[Dict[str, Any]],
                           table_ref: str,
@@ -195,42 +327,70 @@ class BigQueryUploader:
             insert_fields = ", ".join(all_fields)
             insert_values = ", ".join([f"S.{field}" for field in all_fields])
 
-            # 準備 MERGE SQL
-            merge_query = f"""
-            MERGE `{table_ref}` T
-            USING (SELECT * FROM UNNEST(@new_data)) S
-            ON T.order_id = S.order_id
-            WHEN MATCHED THEN
-              UPDATE SET
-                {update_clause}
-            WHEN NOT MATCHED THEN
-              INSERT ({insert_fields})
-              VALUES ({insert_values})
-            """
+            # 建立臨時表並載入資料（避免複雜的 STRUCT 參數型別問題）
+            try:
+                project_id, dataset_id, _ = table_ref.split('.')
+            except ValueError:
+                # 退而求其次：使用預設專案
+                project_id = self.project_id
+                parts = table_ref.split('.')
+                dataset_id = parts[1] if len(parts) > 1 else self.location
 
-            # 設定查詢參數
-            query_params = [bigquery.ArrayQueryParameter('new_data', 'STRUCT', data)]
-            job_config = bigquery.QueryJobConfig(
-                query_parameters=query_params,
-                job_timeout_ms=600000  # 10分鐘逾時
-            )
+            temp_table_id = f"__tmp_merge_{uuid.uuid4().hex[:12]}"
+            temp_full_ref = f"{project_id}.{dataset_id}.{temp_table_id}"
 
-            # 執行 MERGE
-            query_job = self.client.query(merge_query, job_config=job_config)
-            result = query_job.result()
+            # 建立臨時表
+            temp_table = bigquery.Table(temp_full_ref, schema=schema)
+            self.client.create_table(temp_table)
 
-            if query_job.errors:
-                raise Exception(f"MERGE 操作執行錯誤: {query_job.errors}")
+            try:
+                # 載入資料至臨時表
+                load_cfg = bigquery.LoadJobConfig(schema=schema, write_disposition=bigquery.WriteDisposition.WRITE_APPEND)
+                load_job = self.client.load_table_from_json(self._project_records_to_schema(data, schema), temp_full_ref, job_config=load_cfg)
+                load_job.result()
+                if load_job.errors:
+                    raise Exception(load_job.errors)
 
-            # 獲取影響的行數
-            affected_rows = getattr(query_job, 'num_dml_affected_rows', len(data))
+                # 使用臨時表進行 MERGE（來源端依 order_id 去重，取 updated_at 最新一筆）
+                merge_query = f"""
+                MERGE `{table_ref}` T
+                USING (
+                  SELECT * EXCEPT(row_num) FROM (
+                    SELECT *, ROW_NUMBER() OVER (
+                      PARTITION BY order_id
+                      ORDER BY updated_at DESC NULLS LAST
+                    ) AS row_num
+                    FROM `{temp_full_ref}`
+                  ) WHERE row_num = 1
+                ) S
+                ON T.order_id = S.order_id
+                WHEN MATCHED THEN
+                  UPDATE SET
+                    {update_clause}
+                WHEN NOT MATCHED THEN
+                  INSERT ({insert_fields})
+                  VALUES ({insert_values})
+                """
 
-            return {
-                "status": "success",
-                "method": "merge",
-                "records_processed": len(data),
-                "affected_rows": affected_rows
-            }
+                qcfg = bigquery.QueryJobConfig(job_timeout_ms=600000)
+                qjob = self.client.query(merge_query, job_config=qcfg)
+                qjob.result()
+                if qjob.errors:
+                    raise Exception(f"MERGE 操作執行錯誤: {qjob.errors}")
+
+                affected_rows = getattr(qjob, 'num_dml_affected_rows', len(data))
+                return {
+                    "status": "success",
+                    "method": "merge",
+                    "records_processed": len(data),
+                    "affected_rows": affected_rows
+                }
+            finally:
+                # 確保臨時表被移除
+                try:
+                    self.client.delete_table(temp_full_ref, not_found_ok=True)
+                except Exception:
+                    logging.warning(f"無法刪除臨時表: {temp_full_ref}")
 
         except Exception as e:
             logging.error(f"MERGE 操作失敗: {e}")
@@ -268,7 +428,7 @@ class BigQueryUploader:
             )
 
             job = self.client.load_table_from_json(
-                data, table_ref, job_config=job_config
+                self._project_records_to_schema(data, schema), table_ref, job_config=job_config
             )
             job.result()  # 等待完成
 
@@ -290,16 +450,16 @@ class BigQueryUploader:
             else:
                 raise Exception(error_message)
 
-    def get_last_sync_timestamp(self, dataset_id: str, table_id: str) -> int:
+    def get_last_sync_timestamp(self, dataset_id: str, table_id: str) -> str:
         """
-        從 BigQuery 獲取最後一次同步時間戳
+        從 BigQuery 獲取最後一次同步時間
 
         Args:
             dataset_id: 資料集 ID
             table_id: 資料表 ID
 
         Returns:
-            int: 最後同步時間戳（毫秒）
+            str: Ragic 格式的日期時間 (yyyy/MM/dd HH:mm:ss)
         """
         try:
             table_ref = f"{self.project_id}.{dataset_id}.{table_id}"
@@ -314,20 +474,21 @@ class BigQueryUploader:
 
             for row in result:
                 if row.last_sync:
-                    timestamp = int(row.last_sync.timestamp() * 1000)
-                    logging.info(f"獲取到最後同步時間戳: {timestamp}")
-                    return timestamp
+                    # 轉為 Ragic 要求的日期格式
+                    ragic_format = row.last_sync.strftime('%Y/%m/%d %H:%M:%S')
+                    logging.info(f"獲取到最後同步時間: {ragic_format}")
+                    return ragic_format
 
             # 如果沒有資料，返回一週前
             last_week = datetime.datetime.now() - datetime.timedelta(weeks=1)
-            timestamp = int(last_week.timestamp() * 1000)
-            logging.info(f"資料表為空，使用預設時間戳: {timestamp}")
-            return timestamp
+            ragic_format = last_week.strftime('%Y/%m/%d %H:%M:%S')
+            logging.info(f"資料表為空，使用預設時間: {ragic_format}")
+            return ragic_format
 
         except Exception as e:
             logging.warning(f"無法獲取最後同步時間: {e}，使用預設值（一週前）")
             last_week = datetime.datetime.now() - datetime.timedelta(weeks=1)
-            return int(last_week.timestamp() * 1000)
+            return last_week.strftime('%Y/%m/%d %H:%M:%S')
 
     def test_connection(self) -> bool:
         """

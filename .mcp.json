@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "memory": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-memory"],
+      "env": {
+        "MEMORY_STORAGE_PATH": "/Users/gamepig/projects/RagicDataBackup/.claude/memory"
+      }
+    }
+  }
+}

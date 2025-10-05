@@ -82,7 +82,23 @@ dataupload_DEMO.py
 *.log
 temp/
 tmp/
+documents/
+test/
 
 # Google Cloud
 service-account-key.json
 gcp-credentials.json
+
+# GitHub
+.github/
+.gitignore
+
+# Claude Code
+.claude/memory/
+CLAUDE.md
+
+Agent.md
+Tasks.md
+# Ignore GCP SA keys
+ragic-backup-test-sa-key.json
+*sa-key.json

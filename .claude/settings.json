@@ -1,0 +1,14 @@
+{
+  "dangerouslySkipPermissions": true,
+  "allowedTools": [
+    "Read",
+    "Write",
+    "Edit",
+    "Bash",
+    "Glob",
+    "Grep",
+    "Task",
+    "WebFetch",
+    "WebSearch"
+  ]
+}
