@@ -22,9 +22,9 @@ FIELD_MAPPING_CORE = {
     "建檔時間": "created_at",
     "建檔人員": "created_by",
     "建立人員": "created_by",
-    "最後修改日期": "updated_at",
-    "最後修改時間": "updated_at",
-    "最後修改人員": "updated_by",
+    "最後修改日期": "last_modified_date",
+    "最後修改時間": "last_modified_date",
+    "最後修改人員": "last_modified_by",
 
     # 品牌相關（表單 10, 70, 99）
     "品牌名稱": "brand_name",
@@ -77,6 +77,15 @@ FIELD_MAPPING_CORE = {
     "縣市": "city",
     "鄉鎮市區": "district",
     "送貨完整地址": "shipping_address",
+
+    # Ragic 系統鍵（保留原名，利於後續分析）
+    "_ragicId": "_ragicId",
+    "_star": "_star",
+    "_dataTimestamp": "_dataTimestamp",
+    "_index_title_": "_index_title_",
+    "_index_calDates_": "_index_calDates_",
+    "_index_": "_index_",
+    "_seq": "_seq",
 }
 
 # 99 銷售總表完整欄位（234 個欄位中的 93 個）
@@ -125,25 +134,81 @@ FIELD_MAPPING_SALES_SUMMARY = {
     "商品系列": "product_series",
     "商品_動態屬性自定義_1": "product_dynamic_custom_1",
     "商品_動態屬性自定義_2": "product_dynamic_custom_2",
-    # 其他活動相關欄位
+    # 系統更新時間（需保留）
+    "「金流更新」執行時間": "payment_update_execution_time",
+    # 活動文案欄位（純文字，不應映射為時間戳）
     "通路活動號碼1": "channel_promo_1",
     "通路活動號碼2": "channel_promo_2",
     "通路活動號碼3": "channel_promo_3",
     "通路活動號碼4": "channel_promo_4",
     "通路活動號碼5": "channel_promo_5",
     "物流訂單編號": "logistics_order_id",
+    # Ragic 系統索引鍵（99 表常見，保留原名）
+    "RAGIC_AUTOGEN_1622007913868": "RAGIC_AUTOGEN_1622007913868",
+    "RAGIC_AUTOGEN_1622007913873": "RAGIC_AUTOGEN_1622007913873",
+    "_index_": "_index_",
+    "_index_calDates_": "_index_calDates_",
+    "_index_title_": "_index_title_",
 }
 
 # 表單特定對照表
 FIELD_MAPPING_BY_SHEET = {
-    "10": {**FIELD_MAPPING_CORE, "合約起始日期": "contract_start_date", "合約終止日期": "contract_end_date", "內容說明": "description"},
-    "20": {**FIELD_MAPPING_CORE, "合作內容": "cooperation_details", "姓名": "contact_name", "職稱": "job_title"},
-    "30": {**FIELD_MAPPING_CORE, "金流類型": "payment_category", "手續費率": "commission_rate"},
-    "40": {**FIELD_MAPPING_CORE, "物流類型": "logistics_type", "運費": "shipping_fee"},
-    "41": {**FIELD_MAPPING_CORE, "郵遞區號": "postal_code", "縣市": "city", "鄉鎮市區": "district"},
+    "10": {**FIELD_MAPPING_CORE,
+            "合約起始日期": "contract_start_date",
+            "合約終止日期": "contract_end_date",
+            "內容說明": "description",
+            "寄件人": "sender_name",
+            "寄件人電話": "sender_phone",
+            "寄件人地址": "sender_address",
+    },
+    "20": {**FIELD_MAPPING_CORE,
+            "合作內容": "cooperation_details",
+            "姓名": "contact_name",
+            "職稱": "job_title",
+            "即時通訊帳號": "im_account",
+            # 額外保留欄位
+            "電話": "phone_number",
+            "手機": "mobile_phone",
+            "通路_動態屬性預留欄位_1": "channel_dynamic_attr_1",
+            "通路_動態屬性預留欄位_2": "channel_dynamic_attr_2",
+    },
+    "30": {**FIELD_MAPPING_CORE, "金流類型": "payment_category", "手續費率": "commission_rate",
+            # 額外保留欄位
+            "金流_靜態參數預留欄位_1": "payment_static_attr_1",
+            "金流_動態屬性預留欄位_1": "payment_dynamic_attr_1",
+    },
+    "40": {**FIELD_MAPPING_CORE,
+            "物流類型": "logistics_type",
+            "運費": "shipping_fee",
+            "物流客代名稱": "logistics_customer_name",
+            "物流客代編號": "logistics_customer_id",
+            # 額外保留欄位
+            "發貨點": "shipping_point",
+            "取貨點": "pickup_point",
+            "運費支付方式": "shipping_fee_payment_method",
+            "物流_動態屬性預留欄位_1": "logistics_dynamic_attr_1",
+            "物流_動態屬性預留欄位_2": "logistics_dynamic_attr_2",
+    },
+    "41": {**FIELD_MAPPING_CORE, "郵遞區號": "postal_code", "縣市": "city", "鄉鎮市區": "district",
+            # 額外保留欄位
+            "縣市及鄉鎮市區": "city_and_district",
+    },
     "50": {**FIELD_MAPPING_CORE, "平台訂單號碼": "platform_order_id", "訂單編號": "order_id"},
     "60": {**FIELD_MAPPING_CORE, "客戶名稱": "customer_name", "客戶編號": "customer_id"},
-    "70": {**FIELD_MAPPING_CORE, "商品名稱": "product_name", "商品編號": "product_id"},
+    "70": {**FIELD_MAPPING_CORE, "商品名稱": "product_name", "商品編號": "product_id",
+            # 額外保留欄位（商品屬性與價格）
+            "商品規格_官方標示": "product_spec_official",
+            "商品內容": "product_content",
+            "內容說明": "description",
+            "商品建議售價": "product_msrp",
+            "商品常態售價": "product_regular_price",
+            "商品建議售價小計": "product_msrp_subtotal",
+            "商品常態售價小計": "product_regular_price_subtotal",
+            "商品結構": "product_structure",
+            "商品系列": "product_series",
+            "商品_動態屬性自定義_1": "product_dynamic_custom_1",
+            "商品_動態屬性自定義_2": "product_dynamic_custom_2",
+    },
     "99": FIELD_MAPPING_SALES_SUMMARY,
 }
 

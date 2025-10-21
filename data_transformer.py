@@ -112,15 +112,17 @@ FIELD_MAPPING = {
     "商品_動態屬性自定義_1": "product_dynamic_custom_1",
     "商品_動態屬性自定義_2": "product_dynamic_custom_2",
     # 系統欄位（對照實際 CSV：中文→英文）
-    # 注意：英文 CSV 中有兩組時間欄位，前面是英文，後面三個是中文
-    "通路活動號碼1": "created_at",
-    "通路活動號碼2": "created_by",
-    "通路活動號碼3": "updated_at",
-    "通路活動號碼4": "updated_by",
-    "通路活動號碼5": "sync_sales_report_update_time",
-    "物流訂單編號": "sync_sales_report_cancellation_time",
-    "建立日期": "sync_order_mgmt_cancellation_time",
-    "建立人員": "last_modified_date",  # 此欄位在英文 CSV 對應到中文欄位「最後修改日期」
+    # 修正：通路活動號碼應對應通路活動文案，非系統時間欄位
+    "通路活動號碼1": "channel_promo_1",
+    "通路活動號碼2": "channel_promo_2",
+    "通路活動號碼3": "channel_promo_3",
+    "通路活動號碼4": "channel_promo_4",
+    "通路活動號碼5": "channel_promo_5",
+    # 修正：物流訂單編號對應 logistics_order_id（原誤設為取消時間）
+    "物流訂單編號": "logistics_order_id",
+    # 修正：建立日期/建立人員 對應 created_at/created_by
+    "建立日期": "created_at",
+    "建立人員": "created_by",
     # 以下三個欄位在英文 CSV 中原為中文，需轉換為英文
     "最後修改日期": "last_modified_date",
     "最後修改人員": "last_modified_by",
@@ -169,9 +171,12 @@ BIGQUERY_SCHEMA = [
     bigquery.SchemaField("shipping_fee_payment_method", "STRING"),
     bigquery.SchemaField("logistics_dynamic_attr_1", "STRING"),
     bigquery.SchemaField("logistics_dynamic_attr_2", "STRING"),
+    bigquery.SchemaField("logistics_customer_name", "STRING"),
+    bigquery.SchemaField("logistics_customer_id", "STRING"),
 
     # 訂單相關
     bigquery.SchemaField("platform_order_id", "STRING"),
+    bigquery.SchemaField("logistics_order_id", "STRING"),
     bigquery.SchemaField("order_id", "STRING"),
     bigquery.SchemaField("order_date", "DATE"),
     bigquery.SchemaField("order_msrp", "FLOAT"),
@@ -198,6 +203,7 @@ BIGQUERY_SCHEMA = [
     # 配送相關
     bigquery.SchemaField("cash_on_delivery_amount", "FLOAT"),
     bigquery.SchemaField("requested_delivery_date", "DATE"),
+    bigquery.SchemaField("requested_delivery_date_raw", "STRING"),
     bigquery.SchemaField("requested_delivery_time", "STRING"),
 
     # 客戶資訊
@@ -206,6 +212,7 @@ BIGQUERY_SCHEMA = [
     bigquery.SchemaField("customer_id", "STRING"),
     bigquery.SchemaField("email", "STRING"),
     bigquery.SchemaField("birthday", "DATE"),
+    bigquery.SchemaField("birthday_raw", "STRING"),
     bigquery.SchemaField("full_address", "STRING"),
     bigquery.SchemaField("phone_number", "STRING"),
     bigquery.SchemaField("customer_notes", "STRING"),
@@ -219,6 +226,9 @@ BIGQUERY_SCHEMA = [
     bigquery.SchemaField("zodiac_sign", "STRING"),
     bigquery.SchemaField("customer_dynamic_custom_1", "STRING"),
     bigquery.SchemaField("customer_dynamic_custom_2", "STRING"),
+    bigquery.SchemaField("sender_name", "STRING"),
+    bigquery.SchemaField("sender_phone", "STRING"),
+    bigquery.SchemaField("sender_address", "STRING"),
 
     # 商品相關
     bigquery.SchemaField("product_name", "STRING"),
@@ -237,19 +247,33 @@ BIGQUERY_SCHEMA = [
     bigquery.SchemaField("product_dynamic_custom_1", "STRING"),
     bigquery.SchemaField("product_dynamic_custom_2", "STRING"),
 
+    # 通路活動文案（純文字）
+    bigquery.SchemaField("channel_promo_1", "STRING"),
+    bigquery.SchemaField("channel_promo_2", "STRING"),
+    bigquery.SchemaField("channel_promo_3", "STRING"),
+    bigquery.SchemaField("channel_promo_4", "STRING"),
+    bigquery.SchemaField("channel_promo_5", "STRING"),
+
     # 系統欄位
     bigquery.SchemaField("created_at", "TIMESTAMP"),
+    bigquery.SchemaField("created_at_raw", "STRING"),
     bigquery.SchemaField("created_by", "STRING"),
     bigquery.SchemaField("updated_at", "TIMESTAMP"),
+    bigquery.SchemaField("updated_at_raw", "STRING"),
     bigquery.SchemaField("updated_by", "STRING"),
     bigquery.SchemaField("sync_sales_report_update_time", "TIMESTAMP"),
+    bigquery.SchemaField("sync_sales_report_update_time_raw", "STRING"),
     bigquery.SchemaField("sync_sales_report_cancellation_time", "TIMESTAMP"),
+    bigquery.SchemaField("sync_sales_report_cancellation_time_raw", "STRING"),
     bigquery.SchemaField("sync_order_mgmt_cancellation_time", "TIMESTAMP"),
+    bigquery.SchemaField("sync_order_mgmt_cancellation_time_raw", "STRING"),
 
     # 最後修改欄位（原英文 CSV 中為中文，已轉換為英文）
     bigquery.SchemaField("last_modified_date", "TIMESTAMP"),
+    bigquery.SchemaField("last_modified_date_raw", "STRING"),
     bigquery.SchemaField("last_modified_by", "STRING"),
     bigquery.SchemaField("payment_update_execution_time", "TIMESTAMP"),
+    bigquery.SchemaField("payment_update_execution_time_raw", "STRING"),
 
     # Ragic 自動生成欄位
     bigquery.SchemaField("RAGIC_AUTOGEN_1622007913868", "STRING"),
@@ -272,7 +296,9 @@ class DataTransformer:
         field_mapping: Optional[Dict[str, str]] = None,
         sheet_code: str = "99",
         project_id: Optional[str] = None,
-        use_dynamic_mapping: bool = False
+        use_dynamic_mapping: bool = False,
+        drop_unmapped: bool = False,
+        log_per_record_failures: bool = False
     ):
         """
         初始化資料轉換器
@@ -286,7 +312,11 @@ class DataTransformer:
         self.sheet_code = sheet_code
         self.use_dynamic_mapping = use_dynamic_mapping and USE_NEW_CONFIG_SYSTEM
         self.unknown_fields_count = 0  # 記錄未知欄位數量
+        self.unknown_field_counts: Dict[str, int] = {}
         self.invalid_records: List[Dict[str, Any]] = []  # 紀錄無效資料（索引與錯誤細節）
+        self.failure_counts: Dict[str, int] = {}  # 各欄位轉換失敗計數
+        self.drop_unmapped = drop_unmapped
+        self.log_per_record_failures = log_per_record_failures
 
         # 初始化動態對照管理器（Layer 2）
         self.dynamic_mapper = None
@@ -315,7 +345,8 @@ class DataTransformer:
         self.float_fields = {
             "product_msrp", "order_msrp", "order_regular_price", "gross_revenue",
             "net_revenue", "shipping_fee_income", "cash_on_delivery_amount",
-            "product_regular_price", "product_msrp_subtotal", "product_regular_price_subtotal"
+            "product_regular_price", "product_msrp_subtotal", "product_regular_price_subtotal",
+            "shipping_fee",
         }
         self.integer_fields = {"quantity", "birth_year"}
         self.boolean_fields = {"is_invoice_issued", "is_invoice_donated"}
@@ -324,6 +355,18 @@ class DataTransformer:
             "created_at", "updated_at", "sync_sales_report_update_time",
             "sync_sales_report_cancellation_time", "sync_order_mgmt_cancellation_time",
             "last_modified_date", "payment_update_execution_time"
+        }
+        # 需保留原始字串的欄位對
+        self.raw_pairs = {
+            "requested_delivery_date": "requested_delivery_date_raw",
+            "birthday": "birthday_raw",
+            "created_at": "created_at_raw",
+            "updated_at": "updated_at_raw",
+            "sync_sales_report_update_time": "sync_sales_report_update_time_raw",
+            "sync_sales_report_cancellation_time": "sync_sales_report_cancellation_time_raw",
+            "sync_order_mgmt_cancellation_time": "sync_order_mgmt_cancellation_time_raw",
+            "last_modified_date": "last_modified_date_raw",
+            "payment_update_execution_time": "payment_update_execution_time_raw",
         }
 
         # 不允許為空的欄位（依需求：僅檢查 _ragicId）
@@ -345,7 +388,7 @@ class DataTransformer:
             ValueError: 當輸入資料無效時
         """
         if not ragic_data:
-            logging.warning("輸入的 Ragic 資料為空")
+            logging.warning("[transform_data] 輸入的 Ragic 資料為空")
             return []
 
         if not isinstance(ragic_data, list):
@@ -354,7 +397,20 @@ class DataTransformer:
         transformed = []
         failed_records = []
 
-        logging.info(f"開始轉換 {len(ragic_data)} 筆資料")
+        logging.info(f"[transform_data] 開始轉換 {len(ragic_data)} 筆資料")
+
+        # 記錄第一筆資料的樣本
+        if len(ragic_data) > 0:
+            sample = ragic_data[0]
+            sample_keys = list(sample.keys())[:10]  # 只顯示前 10 個欄位
+            logging.info(f"[transform_data] 第一筆資料欄位範例: {sample_keys}")
+            # 檢查是否有日期欄位
+            date_fields = ['最後修改日期', '最後修改時間', '更新時間', '最後更新時間']
+            found_dates = [f for f in date_fields if f in sample]
+            if found_dates:
+                logging.info(f"[transform_data] 第一筆資料包含日期欄位: {found_dates}")
+                for f in found_dates:
+                    logging.info(f"[transform_data] {f} = {sample.get(f)}")
 
         for i, item in enumerate(ragic_data):
             try:
@@ -365,14 +421,14 @@ class DataTransformer:
                     failed_records.append(i)
 
             except Exception as e:
-                logging.error(f"轉換記錄 {i} 時發生錯誤: {e}")
+                logging.error(f"[transform_data] 轉換記錄 {i} 時發生錯誤: {e}")
                 failed_records.append(i)
                 continue
 
         if failed_records:
-            logging.warning(f"共有 {len(failed_records)} 筆記錄轉換失敗，記錄索引: {failed_records[:10]}...")
+            logging.warning(f"[transform_data] 共有 {len(failed_records)} 筆記錄轉換失敗，記錄索引: {failed_records[:10]}...")
 
-        logging.info(f"轉換完成 {len(transformed)} 筆資料，{len(failed_records)} 筆失敗")
+        logging.info(f"[transform_data] 轉換完成 {len(transformed)} 筆資料，{len(failed_records)} 筆失敗")
         return transformed
 
     def _transform_single_record(self, item: Dict[str, Any], index: int) -> Optional[Dict[str, Any]]:
@@ -415,13 +471,20 @@ class DataTransformer:
                     )
                     if is_unknown:
                         self.unknown_fields_count += 1
+                        self.unknown_field_counts[chinese_key] = self.unknown_field_counts.get(chinese_key, 0) + 1
+                        if self.drop_unmapped:
+                            # 嚴格模式：丟棄未對應欄位（不輸出），僅統計
+                            continue
                 else:
-                    # 回退方案：保留原名（舊版行為）
-                    english_key = chinese_key
+                    # 回退方案
                     is_unknown = True
-                    if self.unknown_fields_count < 10:  # 只記錄前 10 個未知欄位
-                        logging.warning(f"未知欄位: {chinese_key} → {english_key}（表單 {self.sheet_code}）")
                     self.unknown_fields_count += 1
+                    self.unknown_field_counts[chinese_key] = self.unknown_field_counts.get(chinese_key, 0) + 1
+                    if self.drop_unmapped:
+                        # 嚴格模式：丟棄未對應欄位（不輸出），僅統計
+                        continue
+                    # 非嚴格模式才保留原名輸出
+                    english_key = chinese_key
 
             # 空值檢查：指定欄位不可為空
             if value is None or (isinstance(value, str) and value.strip() == ""):
@@ -434,14 +497,25 @@ class DataTransformer:
 
             # 型別轉換
             try:
-                converted_value = self._convert_field_type(english_key, value)
+                converted_value = self._convert_field_type(english_key, value, context=transformed_item)
                 transformed_item[english_key] = converted_value
+                # 保留原始值（僅在轉換失敗或屬於需保留清單時記錄）
+                if english_key in self.raw_pairs:
+                    # 僅在原始字串非空時保留
+                    if isinstance(value, str) and value.strip() != "":
+                        transformed_item[self.raw_pairs[english_key]] = str(value)
 
             except (ValueError, TypeError) as e:
-                logging.warning(f"記錄 {index} 的欄位 {english_key} 轉換失敗: {value}, 錯誤: {e}")
+                if self.log_per_record_failures:
+                    logging.warning(f"記錄 {index} 的欄位 {english_key} 轉換失敗: {value}, 錯誤: {e}")
                 errors.append(f"欄位 {english_key} 型別不符: {value}")
                 # 清理策略：不視為無效列，改填預設值/None
                 transformed_item[english_key] = self._get_default_value(english_key)
+                # 轉換失敗則保留原始字串
+                if english_key in self.raw_pairs:
+                    transformed_item[self.raw_pairs[english_key]] = str(value)
+                # 統計欄位失敗計數
+                self.failure_counts[english_key] = self.failure_counts.get(english_key, 0) + 1
 
         # 驗證必要欄位（僅檢查 _ragicId）
         if not self._validate_required_fields(transformed_item, index):
@@ -460,7 +534,7 @@ class DataTransformer:
         transformed_item["sheet_code"] = self.sheet_code
         return transformed_item
 
-    def _convert_field_type(self, field_name: str, value: Any) -> Any:
+    def _convert_field_type(self, field_name: str, value: Any, context: Optional[Dict[str, Any]] = None) -> Any:
         """
         根據欄位類型轉換值
 
@@ -486,6 +560,9 @@ class DataTransformer:
         elif field_name in self.boolean_fields:
             return cleaned_value.lower() in ['true', '1', 'yes', '是', '開立']
         elif field_name in self.date_fields:
+            # 特例：requested_delivery_date 支援月/日推斷年份
+            if field_name == "requested_delivery_date":
+                return self._normalize_date(cleaned_value, context=context, infer_year_from="order_date")
             return self._normalize_date(cleaned_value)
         elif field_name in self.timestamp_fields:
             return self._normalize_timestamp(cleaned_value)
@@ -502,6 +579,9 @@ class DataTransformer:
         Returns:
             Any: 預設值
         """
+        # 日期/時間戳欄位回傳 None，避免型別不符
+        if field_name in self.date_fields or field_name in self.timestamp_fields:
+            return None
         if field_name in self.float_fields:
             return 0.0
         elif field_name in self.integer_fields:
@@ -511,7 +591,7 @@ class DataTransformer:
         else:
             return ""
 
-    def _normalize_date(self, value: str) -> str:
+    def _normalize_date(self, value: str, context: Optional[Dict[str, Any]] = None, infer_year_from: Optional[str] = None) -> str:
         """
         將常見日期格式正規化為 YYYY-MM-DD
         """
@@ -527,12 +607,33 @@ class DataTransformer:
             "%Y-%m-%d %H:%M",
             "%Y/%m/%d %H:%M",
         ]
+        # 常見無效字串直接視為不可解析
+        if value.strip() in {"不指定", "N/A", "NA", "-", "—", "null", "None", "ADDLINE"}:
+            raise ValueError(f"無法解析日期: {value}")
+
         for fmt in candidates:
             try:
                 dt = datetime.strptime(value.strip(), fmt)
                 return dt.strftime("%Y-%m-%d")
             except ValueError:
                 continue
+        # 支援月/日（省略年份）→ 以 context 的 infer_year_from 推斷年份
+        v = value.strip()
+        if infer_year_from and context is not None:
+            # 簡單偵測 M/D 或 MM/DD
+            parts = v.split('/') if '/' in v else v.split('-')
+            if len(parts) == 2 and all(p.isdigit() for p in parts):
+                m, d = parts
+                try:
+                    ref = context.get(infer_year_from)
+                    if isinstance(ref, str) and ref:
+                        # ref 可能是 YYYY-MM-DD 或 YYYY-MM-DDTHH:MM:SS
+                        ref_year = ref[:4]
+                        test = f"{ref_year}-{int(m):02d}-{int(d):02d}"
+                        dt2 = datetime.strptime(test, "%Y-%m-%d")
+                        return dt2.strftime("%Y-%m-%d")
+                except Exception:
+                    pass
         raise ValueError(f"無法解析日期: {value}")
 
     def _normalize_timestamp(self, value: str) -> str:
@@ -544,6 +645,8 @@ class DataTransformer:
             raise ValueError("時間戳欄位必須是字串")
 
         v = value.strip()
+        if v in {"不指定", "N/A", "NA", "-", "—", "null", "None", "ADDLINE"}:
+            raise ValueError(f"無法解析時間戳: {value}")
         candidates = [
             "%Y-%m-%d %H:%M:%S",
             "%Y/%m/%d %H:%M:%S",
@@ -559,6 +662,13 @@ class DataTransformer:
                 return dt.strftime("%Y-%m-%dT%H:%M:%S")
             except ValueError:
                 continue
+        # 支援 14 碼數字時間戳（YYYYMMDDHHMMSS）
+        if v.isdigit() and len(v) == 14:
+            try:
+                dt = datetime.strptime(v, "%Y%m%d%H%M%S")
+                return dt.strftime("%Y-%m-%dT%H:%M:%S")
+            except ValueError:
+                pass
         # 常見的 ISO 格式直接返回
         try:
             # 若已是 ISO 8601，嘗試解析
@@ -582,7 +692,8 @@ class DataTransformer:
         # 僅檢查 _ragicId 不可為空
         v = record.get("_ragicId")
         if v is None or (isinstance(v, str) and v.strip() == ""):
-            logging.warning(f"記錄 {index} 缺少必要欄位或為空: _ragicId，跳過")
+            # 僅統計，不逐筆噴訊息
+            self.failure_counts["_ragicId_missing"] = self.failure_counts.get("_ragicId_missing", 0) + 1
             return False
 
         return True
@@ -604,6 +715,18 @@ class DataTransformer:
             Dict[str, str]: 欄位映射字典
         """
         return self.field_mapping.copy()
+
+    def get_unknown_field_counts(self) -> Dict[str, int]:
+        """
+        取得未對應（未知）欄位統計
+        """
+        return dict(self.unknown_field_counts)
+
+    def get_failure_counts(self) -> Dict[str, int]:
+        """
+        取得各欄位轉換失敗次數統計
+        """
+        return dict(self.failure_counts)
 
     def get_invalid_records(self) -> List[Dict[str, Any]]:
         """

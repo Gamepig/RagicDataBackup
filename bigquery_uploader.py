@@ -117,6 +117,42 @@ class BigQueryUploader:
             logging.error(f"BigQuery 上傳失敗: {e}")
             raise
 
+    def truncate_table(self, dataset_id: str, table_id: str, *, confirm: bool = False) -> None:
+        """
+        清空指定資料表（僅用於手動全量上傳前）。
+
+        Args:
+            dataset_id: 資料集 ID
+            table_id: 資料表 ID
+            confirm: 必須為 True 才允許執行，避免誤刪
+        """
+        if not confirm:
+            raise ValueError("為避免誤刪，truncate_table 需要 confirm=True 才能執行")
+
+        table_ref = f"{self.project_id}.{dataset_id}.{table_id}"
+        logging.info(f"即將清空資料表: {table_ref}")
+        try:
+            # 先確保資料表存在
+            self._ensure_table_exists(dataset_id, table_id, BIGQUERY_SCHEMA)
+
+            # 優先使用 TRUNCATE TABLE，若不支援則改用 DELETE FROM
+            try:
+                qcfg = bigquery.QueryJobConfig(job_timeout_ms=600000)
+                q = f"TRUNCATE TABLE `{table_ref}`"
+                job = self.client.query(q, job_config=qcfg)
+                job.result()
+            except Exception:
+                logging.warning("TRUNCATE TABLE 失敗，改用 DELETE FROM 方式清空")
+                qcfg = bigquery.QueryJobConfig(job_timeout_ms=600000)
+                q = f"DELETE FROM `{table_ref}` WHERE TRUE"
+                job = self.client.query(q, job_config=qcfg)
+                job.result()
+
+            logging.info(f"資料表已清空: {table_ref}")
+        except Exception as e:
+            logging.error(f"清空資料表失敗: {e}")
+            raise
+
     def _ensure_table_exists(self,
                            dataset_id: str,
                            table_id: str,
@@ -180,6 +216,19 @@ class BigQueryUploader:
                 logging.info(f"資料集 {dataset_id} 建立成功")
             except Exception as e:
                 raise Exception(f"建立資料集失敗: {e}")
+
+    def _get_existing_table_schema(self, table_ref: str) -> Optional[List[bigquery.SchemaField]]:
+        """
+        讀取 BigQuery 目標表的現有 Schema，若不存在則回傳 None。
+        """
+        try:
+            table = self.client.get_table(table_ref)
+            return list(table.schema)
+        except NotFound:
+            return None
+        except Exception as e:
+            logging.warning(f"讀取資料表 Schema 失敗（{table_ref}）: {e}")
+            return None
 
     def _project_records_to_schema(self, data: List[Dict[str, Any]], schema: List[bigquery.SchemaField]) -> List[Dict[str, Any]]:
         """
@@ -256,17 +305,21 @@ class BigQueryUploader:
         staging_schema = self._get_staging_schema(base_schema)
         staging_table_ref = self._ensure_table_exists(dataset_id, staging_table_id, staging_schema)
 
-        # 附加批次欄位
+        # 以實際 staging 表 schema 為準，避免未知欄位
+        existing_staging_schema = self._get_existing_table_schema(staging_table_ref) or staging_schema
+
+        # 附加批次欄位並投影到 schema（排除未知欄位如 _ragicId 等）
         payload = []
+        allowed_fields = {f.name for f in existing_staging_schema}
         for item in data:
-            enriched = dict(item)
+            enriched = {k: v for k, v in item.items() if k in allowed_fields}
             enriched['batch_id'] = batch_id
             enriched['ingested_at'] = ingested_at
             payload.append(enriched)
 
         # 載入至 staging（Append）
         job_config = bigquery.LoadJobConfig(
-            schema=staging_schema,
+            schema=existing_staging_schema,
             write_disposition=bigquery.WriteDisposition.WRITE_APPEND
         )
         load_job = self.client.load_table_from_json(payload, staging_table_ref, job_config=job_config)
@@ -317,7 +370,15 @@ class BigQueryUploader:
 
         try:
             # 動態生成所有欄位名稱
-            all_fields = [field.name for field in schema]
+            # 以目標表現有欄位為準，與提供 schema 取交集，避免未知欄位
+            existing_schema = self._get_existing_table_schema(table_ref) or schema
+            existing_names = {f.name for f in existing_schema}
+            provided_by_name = {f.name: f for f in schema}
+            effective_schema = [provided_by_name[name] for name in existing_names if name in provided_by_name]
+            if not effective_schema:
+                effective_schema = schema
+
+            all_fields = [field.name for field in effective_schema]
 
             # 生成 UPDATE SET 子句
             update_statements = [f"T.{field} = S.{field}" for field in all_fields if field != 'order_id']
@@ -340,13 +401,13 @@ class BigQueryUploader:
             temp_full_ref = f"{project_id}.{dataset_id}.{temp_table_id}"
 
             # 建立臨時表
-            temp_table = bigquery.Table(temp_full_ref, schema=schema)
+            temp_table = bigquery.Table(temp_full_ref, schema=effective_schema)
             self.client.create_table(temp_table)
 
             try:
                 # 載入資料至臨時表
-                load_cfg = bigquery.LoadJobConfig(schema=schema, write_disposition=bigquery.WriteDisposition.WRITE_APPEND)
-                load_job = self.client.load_table_from_json(self._project_records_to_schema(data, schema), temp_full_ref, job_config=load_cfg)
+                load_cfg = bigquery.LoadJobConfig(schema=effective_schema, write_disposition=bigquery.WriteDisposition.WRITE_APPEND)
+                load_job = self.client.load_table_from_json(self._project_records_to_schema(data, effective_schema), temp_full_ref, job_config=load_cfg)
                 load_job.result()
                 if load_job.errors:
                     raise Exception(load_job.errors)
@@ -464,9 +525,9 @@ class BigQueryUploader:
         try:
             table_ref = f"{self.project_id}.{dataset_id}.{table_id}"
             query = f"""
-            SELECT MAX(updated_at) as last_sync
+            SELECT MAX(COALESCE(last_modified_date, updated_at, created_at)) as last_sync
             FROM `{table_ref}`
-            WHERE updated_at IS NOT NULL
+            WHERE COALESCE(last_modified_date, updated_at, created_at) IS NOT NULL
             """
 
             query_job = self.client.query(query)
@@ -487,6 +548,36 @@ class BigQueryUploader:
 
         except Exception as e:
             logging.warning(f"無法獲取最後同步時間: {e}，使用預設值（一週前）")
+            last_week = datetime.datetime.now() - datetime.timedelta(weeks=1)
+            return last_week.strftime('%Y/%m/%d %H:%M:%S')
+
+    def get_last_sync_timestamp_by_sheet(self, dataset_id: str, table_id: str, sheet_code: str) -> str:
+        """
+        依 sheet_code 從 BigQuery 取得最後同步時間（避免使用全表最大時間導致其他表全數被跳過）。
+
+        Returns Ragic 格式 yyyy/MM/dd HH:mm:ss；若無資料，回傳一週前。
+        """
+        try:
+            table_ref = f"{self.project_id}.{dataset_id}.{table_id}"
+            query = f"""
+            SELECT MAX(COALESCE(last_modified_date, updated_at, created_at)) as last_sync
+            FROM `{table_ref}`
+            WHERE sheet_code = @sheet_code
+              AND COALESCE(last_modified_date, updated_at, created_at) IS NOT NULL
+            """
+            qcfg = bigquery.QueryJobConfig(query_parameters=[
+                bigquery.ScalarQueryParameter('sheet_code', 'STRING', sheet_code)
+            ])
+            result = self.client.query(query, job_config=qcfg).result()
+            for row in result:
+                if row.last_sync:
+                    logging.info(f"[sheet {sheet_code}] 最後同步時間: {row.last_sync.strftime('%Y/%m/%d %H:%M:%S')}")
+                    return row.last_sync.strftime('%Y/%m/%d %H:%M:%S')
+            last_week = datetime.datetime.now() - datetime.timedelta(weeks=1)
+            logging.info(f"[sheet {sheet_code}] 無歷史資料，使用一週前: {last_week.strftime('%Y/%m/%d %H:%M:%S')}")
+            return last_week.strftime('%Y/%m/%d %H:%M:%S')
+        except Exception as e:
+            logging.warning(f"無法依表取得最後同步時間（{sheet_code}）: {e}，使用一週前")
             last_week = datetime.datetime.now() - datetime.timedelta(weeks=1)
             return last_week.strftime('%Y/%m/%d %H:%M:%S')
 
