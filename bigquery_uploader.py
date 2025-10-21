@@ -571,11 +571,16 @@ class BigQueryUploader:
             result = self.client.query(query, job_config=qcfg).result()
             for row in result:
                 if row.last_sync:
-                    logging.info(f"[sheet {sheet_code}] 最後同步時間: {row.last_sync.strftime('%Y/%m/%d %H:%M:%S')}")
-                    return row.last_sync.strftime('%Y/%m/%d %H:%M:%S')
-            last_week = datetime.datetime.now() - datetime.timedelta(weeks=1)
-            logging.info(f"[sheet {sheet_code}] 無歷史資料，使用一週前: {last_week.strftime('%Y/%m/%d %H:%M:%S')}")
-            return last_week.strftime('%Y/%m/%d %H:%M:%S')
+                    # BigQuery TIMESTAMP 是 UTC，需轉換為台北時間（UTC+8）給 Ragic API 使用
+                    taipei_time = row.last_sync + datetime.timedelta(hours=8)
+                    logging.info(f"[sheet {sheet_code}] 最後同步時間（UTC）: {row.last_sync.strftime('%Y/%m/%d %H:%M:%S')}")
+                    logging.info(f"[sheet {sheet_code}] 最後同步時間（台北）: {taipei_time.strftime('%Y/%m/%d %H:%M:%S')}")
+                    return taipei_time.strftime('%Y/%m/%d %H:%M:%S')
+            # 無歷史資料時，也需轉換為台北時間
+            last_week_utc = datetime.datetime.now() - datetime.timedelta(weeks=1)
+            last_week_taipei = last_week_utc + datetime.timedelta(hours=8)
+            logging.info(f"[sheet {sheet_code}] 無歷史資料，使用一週前（台北時間）: {last_week_taipei.strftime('%Y/%m/%d %H:%M:%S')}")
+            return last_week_taipei.strftime('%Y/%m/%d %H:%M:%S')
         except Exception as e:
             logging.warning(f"無法依表取得最後同步時間（{sheet_code}）: {e}，使用一週前")
             last_week = datetime.datetime.now() - datetime.timedelta(weeks=1)
