@@ -45,13 +45,23 @@ def write_json(path: Path, obj: Any) -> None:
         json.dump(obj, f, ensure_ascii=False, indent=2)
 
 
-def find_sheet_files(batch_dir: Path) -> Dict[str, Dict[str, Any]]:
+def find_sheet_files(batch_dir: Path, input_mode: str = "auto") -> Dict[str, Dict[str, Any]]:
     """尋找每個 sheet_code 的輸入來源。
 
-    回傳 {sheet_code: {mode: 'combined'|'pages', 'combined': Path|None, 'pages': [Path]}}。
+    回傳 {sheet_code: {mode: 'combined'|'pages'|'processed', 'combined': Path|None, 'pages': [Path], 'processed': Path|None}}。
     """
     mapping: Dict[str, Dict[str, Any]] = {}
 
+    # processed 模式：讀取 processed/<sheet_code>.json（已轉換英文欄位）
+    if input_mode == "processed":
+        processed_dir = batch_dir / "processed"
+        if processed_dir.exists() and processed_dir.is_dir():
+            for p in processed_dir.glob("*.json"):
+                sc = p.stem  # 檔名（不含副檔名）即 sheet_code
+                mapping[sc] = {"mode": "processed", "combined": None, "pages": [], "processed": p}
+        return mapping
+
+    # raw 模式（combined/pages）
     # 1) 合併檔（<sheet_code>_*.json）
     for p in batch_dir.glob("*.json"):
         name = p.name
@@ -59,7 +69,7 @@ def find_sheet_files(batch_dir: Path) -> Dict[str, Dict[str, Any]]:
             continue
         if "_" in name:
             sc = name.split("_", 1)[0]
-            mapping.setdefault(sc, {"mode": None, "combined": None, "pages": []})
+            mapping.setdefault(sc, {"mode": None, "combined": None, "pages": [], "processed": None})
             mapping[sc]["combined"] = p
             mapping[sc]["mode"] = "combined"
 
@@ -69,7 +79,7 @@ def find_sheet_files(batch_dir: Path) -> Dict[str, Dict[str, Any]]:
             sc = sub.name
             pages = sorted(sub.glob("page-*.json"))
             if pages:
-                d = mapping.setdefault(sc, {"mode": None, "combined": None, "pages": []})
+                d = mapping.setdefault(sc, {"mode": None, "combined": None, "pages": [], "processed": None})
                 d["pages"] = pages
                 d["mode"] = d["mode"] or "pages"
 
@@ -77,6 +87,10 @@ def find_sheet_files(batch_dir: Path) -> Dict[str, Dict[str, Any]]:
 
 
 def read_records_for_sheet(entry: Dict[str, Any]) -> List[Dict[str, Any]]:
+    if entry.get("mode") == "processed" and entry.get("processed"):
+        data = read_json(entry["processed"]) or []
+        return data if isinstance(data, list) else []
+
     if entry.get("mode") == "combined" and entry.get("combined"):
         data = read_json(entry["combined"]) or []
         return data if isinstance(data, list) else []
@@ -100,12 +114,15 @@ def main() -> None:
     parser.add_argument("--table", type=str, required=True, help="BigQuery Table ID")
     parser.add_argument("--input-dir", type=str, required=True, help="輸入資料夾（tests/data/<batch>）")
     parser.add_argument("--upload-mode", type=str, choices=["auto", "direct", "staging_sp"], default="auto")
+    parser.add_argument("--input-mode", type=str, choices=["auto", "raw", "processed"], default="auto", help="輸入資料型態：raw(中文原始) 或 processed(已轉換英文)")
     parser.add_argument("--use-merge", type=str, default="true", help="是否使用 MERGE（true/false）")
     parser.add_argument("--batch-threshold", type=int, default=5000, help="auto 模式分流門檻")
     parser.add_argument("--staging-table", type=str, default=None, help="staging 表名（可省略）")
     parser.add_argument("--merge-sp-name", type=str, default=None, help="預儲程序名稱（可省略）")
     parser.add_argument("--emit-processed-json", action="store_true", help="輸出 processed/ 英文欄位 JSON")
     parser.add_argument("--log-level", type=str, default="INFO", help="日誌層級")
+    parser.add_argument("--truncate-before", action="store_true", help="手動全量上傳：上傳前先清空目標表")
+    parser.add_argument("--location", type=str, default="asia-east1", help="BigQuery 資料集區域（預設 asia-east1）")
     args = parser.parse_args()
 
     setup_logging(args.log_level)
@@ -116,17 +133,25 @@ def main() -> None:
         sys.exit(1)
 
     # 建立上傳器
-    uploader = BigQueryUploader(project_id=args.project_id)
+    uploader = BigQueryUploader(project_id=args.project_id, location=args.location)
     if not uploader.test_connection():
         logging.warning("BigQuery 連線測試失敗，請確認認證與網路")
 
     # 找輸入檔
-    sheet_map = find_sheet_files(input_dir)
+    sheet_map = find_sheet_files(input_dir, input_mode=(args.input_mode if args.input_mode != "auto" else "raw"))
     if not sheet_map:
         logging.error("找不到任何輸入檔")
         sys.exit(1)
 
     processed_dir = input_dir / "processed"
+
+    # 若指定手動全量上傳，先清空目標表，避免重複
+    if args.truncate_before:
+        try:
+            uploader.truncate_table(dataset_id=args.dataset, table_id=args.table, confirm=True)
+        except Exception as e:
+            logging.error(f"清空目標表失敗，停止上傳：{e}")
+            sys.exit(2)
     summary: Dict[str, Any] = {
         "input_dir": str(input_dir),
         "dataset": args.dataset,
@@ -144,17 +169,20 @@ def main() -> None:
             summary["results"][sheet_code] = {"status": "no_data", "records": 0}
             continue
 
-        # 轉換（中文→英文欄位與型別）
-        transformer = create_transformer(sheet_code=sheet_code, project_id=args.project_id, use_dynamic_mapping=False)
-        if not transformer.validate_data_format(raw_records):
-            logging.error(f"sheet_code={sheet_code} 資料格式無效，略過")
-            summary["results"][sheet_code] = {"status": "invalid_format"}
-            continue
-
-        transformed = transformer.transform_data(raw_records)
-        if args.emit_processed_json:
-            out_path = processed_dir / f"{sheet_code}.json"
-            write_json(out_path, transformed)
+        # 轉換（中文→英文）或直接使用 processed
+        transformer = create_transformer(sheet_code=sheet_code, project_id=args.project_id, use_dynamic_mapping=False, drop_unmapped=False, log_per_record_failures=False)
+        if entry.get("mode") == "processed":
+            # 已為英文欄位與正確型別的列表
+            transformed = raw_records
+        else:
+            if not transformer.validate_data_format(raw_records):
+                logging.error(f"sheet_code={sheet_code} 資料格式無效，略過")
+                summary["results"][sheet_code] = {"status": "invalid_format"}
+                continue
+            transformed = transformer.transform_data(raw_records)
+            if args.emit_processed_json:
+                out_path = processed_dir / f"{sheet_code}.json"
+                write_json(out_path, transformed)
 
         # 上傳
         try:

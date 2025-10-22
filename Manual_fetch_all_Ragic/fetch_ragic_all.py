@@ -160,16 +160,27 @@ def fetch_incremental_since(
     last_modified_field_names: List[str],
     limit: int,
     max_pages: int,
+    until_date: Optional[str] = None,
 ) -> Dict[str, Any]:
     """增量抓取（本地過濾 + 翻頁規則），直接輸出合併檔。"""
     t0 = time.time()
     since_dt = datetime.now() - timedelta(days=since_days)
+    until_dt = None
+    if until_date:
+        # 支援 YYYY-MM-DD 或 YYYY/MM/DD
+        ds = until_date.strip()
+        for fmt in ("%Y-%m-%d", "%Y/%m/%d"):
+            try:
+                until_dt = datetime.strptime(ds, fmt)
+                break
+            except Exception:
+                continue
 
     records = client.fetch_since_local_paged(
         sheet_id=sheet_id,
         since_dt=since_dt,
         last_modified_field_names=last_modified_field_names,
-        until_dt=None,
+        until_dt=until_dt,
         limit=limit,
         max_pages=max_pages,
     )
@@ -332,6 +343,7 @@ def main() -> None:
     parser.add_argument("--out-dir", type=str, default=None, help="輸出資料夾（預設 tests/data/<batch>）")
     parser.add_argument("--mode", type=str, choices=["since_local_paged", "full"], default="since_local_paged")
     parser.add_argument("--since-days", type=int, default=7, help="增量模式：回溯天數")
+    parser.add_argument("--until-date", type=str, default=None, help="增量模式：上界日期 YYYY-MM-DD（含當日）")
     parser.add_argument("--limit", type=int, default=1000, help="每頁筆數（小表）")
     parser.add_argument("--large-limit", type=int, default=10000, help="每頁筆數（大表）")
     parser.add_argument("--max-pages", type=int, default=50, help="增量模式：最多頁數")
@@ -424,6 +436,7 @@ def main() -> None:
                     last_modified_field_names=last_modified_field_names,
                     limit=per_limit,
                     max_pages=args.max_pages,
+                    until_date=args.until_date,
                 )
 
             manifest["sheets"][sheet_code] = {

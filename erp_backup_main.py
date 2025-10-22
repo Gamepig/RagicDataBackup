@@ -7,11 +7,20 @@ ERP 資料備份主程式
 import os
 import json
 import logging
-import datetime
+from datetime import datetime, timezone, timedelta
+from data_transformer import TAIPEI_TZ # For robust timezone handling
 import time
 import requests
 from typing import Dict, Any, Optional, List
 from google.cloud import bigquery
+
+# Sheet 時間欄位配置
+from sheet_time_field_config import (
+    get_time_fields_for_sheet,
+    get_sheet_id,
+    get_all_sheet_codes,
+    is_static_sheet
+)
 
 # 導入自定義模組
 from ragic_client import RagicClient
@@ -169,122 +178,9 @@ class ERPBackupManager:
         logging.info(f"連線測試結果: {results}")
         return results
 
-    def get_last_sync_timestamp(self) -> str:
-        """
-        獲取最後同步時間
+    
 
-        Returns:
-            str: Ragic 格式的日期時間 (yyyy/MM/dd HH:mm:ss)
-        """
-        try:
-            # 強制測試視窗：支援以環境變數覆蓋時間窗
-            force_iso = os.environ.get('FORCE_SINCE_ISO')  # 例: 2025-09-01T00:00:00
-            force_days = os.environ.get('FORCE_SINCE_DAYS')  # 例: 30
-            if force_iso:
-                try:
-                    dt = datetime.datetime.fromisoformat(force_iso.replace('Z', '+00:00')).replace(tzinfo=None)
-                    return dt.strftime('%Y/%m/%d %H:%M:%S')
-                except Exception:
-                    logging.warning(f"FORCE_SINCE_ISO 非法，忽略: {force_iso}")
-            if force_days:
-                try:
-                    days = int(force_days)
-                    dt = datetime.datetime.now() - datetime.timedelta(days=days)
-                    return dt.strftime('%Y/%m/%d %H:%M:%S')
-                except Exception:
-                    logging.warning(f"FORCE_SINCE_DAYS 非法，忽略: {force_days}")
-
-            if self.uploader:
-                return self.uploader.get_last_sync_timestamp(
-                    self.config['bigquery_dataset'],
-                    self.config['bigquery_table']
-                )
-            else:
-                raise Exception("BigQuery 上傳器未初始化")
-
-        except Exception as e:
-            logging.warning(f"無法獲取最後同步時間: {e}，使用預設值")
-            # 返回一週前的時間（Ragic 格式）
-            last_week = datetime.datetime.now() - datetime.timedelta(weeks=1)
-            return last_week.strftime('%Y/%m/%d %H:%M:%S')
-
-    def fetch_ragic_data(self, last_sync_time: str) -> list:
-        """
-        從 Ragic 獲取資料
-
-        Args:
-            last_sync_time: 最後同步時間 (Ragic 格式: yyyy/MM/dd HH:mm:ss)
-
-        Returns:
-            list: 原始 Ragic 資料
-
-        Raises:
-            Exception: 當資料獲取失敗時
-        """
-        if not self.ragic_client:
-            raise Exception("Ragic 客戶端未初始化")
-
-        logging.info("開始從 Ragic 獲取資料...")
-
-        try:
-            # 預設採用：單頁抓取 + 本地過濾一週（必要時自動翻頁）
-            # 1) 解析 last_sync_time（Ragic 格式）為 datetime
-            since_dt = None
-            for fmt in ['%Y/%m/%d %H:%M:%S', '%Y-%m-%d %H:%M:%S', '%Y/%m/%d', '%Y-%m-%d']:
-                try:
-                    since_dt = datetime.datetime.strptime(last_sync_time, fmt)
-                    break
-                except Exception:
-                    continue
-            if since_dt is None:
-                # 無法解析時，退回一週前
-                since_dt = datetime.datetime.utcnow() - datetime.timedelta(days=7)
-
-            # 2) 決定最後修改欄位名稱清單（可由環境變數提供，否則使用預設）
-            names_env = self.config.get('last_modified_field_names')
-            if names_env:
-                last_modified_field_names = [n.strip() for n in names_env.split(',') if n.strip()]
-            else:
-                last_modified_field_names = ['最後修改日期', '最後修改時間', '更新時間', '最後更新時間']
-
-            # 3) 大表提高單頁 limit
-            sid = self.config['ragic_sheet_id']
-            default_limit = self.config.get('ragic_page_size', 1000)
-            per_sheet_boost = {'forms8/17': 3000, 'forms8/2': 3000, 'forms8/3': 3000}
-            limit = per_sheet_boost.get(sid, default_limit)
-            max_pages = int(self.config.get('ragic_max_pages', 50))
-
-            # 上界（測試用）：FORCE_UNTIL_ISO / FORCE_UNTIL_DAYS
-            until_dt = None
-            fui = os.environ.get('FORCE_UNTIL_ISO')
-            fud = os.environ.get('FORCE_UNTIL_DAYS')
-            if fui:
-                try:
-                    until_dt = datetime.datetime.fromisoformat(fui.replace('Z', '+00:00')).replace(tzinfo=None)
-                except Exception:
-                    logging.warning(f"FORCE_UNTIL_ISO 非法，忽略: {fui}")
-            elif fud:
-                try:
-                    d = int(fud)
-                    until_dt = datetime.datetime.now() - datetime.timedelta(days=d)
-                except Exception:
-                    logging.warning(f"FORCE_UNTIL_DAYS 非法，忽略: {fud}")
-
-            data = self.ragic_client.fetch_since_local_paged(
-                sheet_id=sid,
-                since_dt=since_dt,
-                last_modified_field_names=last_modified_field_names,
-                until_dt=until_dt,
-                limit=limit,
-                max_pages=max_pages
-            )
-
-            logging.info(f"成功獲取 {len(data)} 筆 Ragic 資料（local paged incremental）")
-            return data
-
-        except Exception as e:
-            logging.error(f"Ragic 資料獲取失敗: {e}")
-            raise
+    
 
     def fetch_ragic_data_for_sheet(self, sheet_id: str, last_sync_time: str, last_modified_names: Optional[List[str]] = None, limit: Optional[int] = None, max_pages: Optional[int] = None) -> list:
         """針對指定 sheet 以「單頁抓取 + 本地過濾一週（必要時自動翻頁）」取得資料。"""
@@ -292,30 +188,37 @@ class ERPBackupManager:
             raise Exception("Ragic 客戶端未初始化")
 
         logging.info(f"[fetch_ragic_data_for_sheet] 開始處理 {sheet_id}")
-        logging.info(f"[fetch_ragic_data_for_sheet] last_sync_time 輸入: {last_sync_time}")
+        logging.info(f"[fetch_ragic_data_for_sheet] last_sync_time 輸入: {last_sync_time.isoformat()}") # Log isoformat
 
-        # 解析 last_sync_time → datetime
-        since_dt = None
-        for fmt in ['%Y/%m/%d %H:%M:%S', '%Y-%m-%d %H:%M:%S', '%Y/%m/%d', '%Y-%m-%d']:
-            try:
-                since_dt = datetime.datetime.strptime(last_sync_time, fmt)
-                logging.info(f"[fetch_ragic_data_for_sheet] 成功解析日期，格式: {fmt}")
-                break
-            except Exception:
-                continue
+        # last_sync_time 已經是 UTC timezone-aware datetime 物件，直接使用
+        since_dt = last_sync_time
+        logging.info(f"[fetch_ragic_data_for_sheet] 使用的 since_dt (UTC): {since_dt.isoformat()}")
+
+        # 如果 last_sync_time 是 None (不應該發生，但作為防禦性編程)
         if since_dt is None:
-            since_dt = datetime.datetime.utcnow() - datetime.timedelta(days=7)
-            logging.warning(f"[fetch_ragic_data_for_sheet] 無法解析日期，使用預設一週前: {since_dt.strftime('%Y-%m-%d %H:%M:%S')}")
-        else:
-            logging.info(f"[fetch_ragic_data_for_sheet] 解析後的 since_dt: {since_dt.strftime('%Y-%m-%d %H:%M:%S')}")
+            since_dt = datetime.datetime.now(timezone.utc) - datetime.timedelta(days=7)
+            logging.warning(f"[fetch_ragic_data_for_sheet] last_sync_time 為空，使用預設一週前 (UTC): {since_dt.isoformat()}")
 
-        # 欄位名稱清單
+        # 欄位名稱清單（優先順序：參數 > sheet_id配置 > 環境變數 > 預設值）
         if last_modified_names and isinstance(last_modified_names, list) and last_modified_names:
             names = last_modified_names
+            logging.info(f"[fetch_ragic_data_for_sheet] 使用參數提供的時間欄位: {names}")
         else:
-            names_env = self.config.get('last_modified_field_names')
-            names = [n.strip() for n in names_env.split(',')] if names_env else ['最後修改日期', '最後修改時間', '更新時間', '最後更新時間']
-        logging.info(f"[fetch_ragic_data_for_sheet] 日期欄位清單: {names}")
+            # 嘗試從 sheet_id 推斷 sheet_code 並使用配置
+            from sheet_time_field_config import SHEET_ID_MAP
+            sheet_code = None
+            for code, sid in SHEET_ID_MAP.items():
+                if sid == sheet_id:
+                    sheet_code = code
+                    break
+
+            if sheet_code:
+                names = get_time_fields_for_sheet(sheet_code)
+                logging.info(f"[fetch_ragic_data_for_sheet] 使用 Sheet {sheet_code} 配置的時間欄位: {names}")
+            else:
+                # If sheet_code cannot be inferred, get_time_fields_for_sheet will return DEFAULT_TIME_FIELDS
+                names = get_time_fields_for_sheet(None) # Pass None or an empty string to trigger default
+                logging.warning(f"[fetch_ragic_data_for_sheet] 未知 sheet_id={sheet_id}，使用預設時間欄位: {names}")
 
         # 單頁限制與最大頁數
         default_limit = self.config.get('ragic_page_size', 1000)
@@ -337,8 +240,9 @@ class ERPBackupManager:
         elif fud:
             try:
                 d = int(fud)
-                until_dt = datetime.datetime.now() - datetime.timedelta(days=d)
-                logging.info(f"[fetch_ragic_data_for_sheet] 使用 FORCE_UNTIL_DAYS: {until_dt.strftime('%Y-%m-%d %H:%M:%S')}")
+                # 使用台北時間
+                until_dt = datetime.datetime.now(timezone.utc) - datetime.timedelta(days=d)
+                logging.info(f"[fetch_ragic_data_for_sheet] 使用 FORCE_UNTIL_DAYS（台北時間）: {until_dt.strftime('%Y-%m-%d %H:%M:%S')}")
             except Exception:
                 logging.warning(f"FORCE_UNTIL_DAYS 非法，忽略: {fud}")
 
@@ -348,7 +252,8 @@ class ERPBackupManager:
             last_modified_field_names=names,
             until_dt=until_dt,
             limit=lim,
-            max_pages=maxp
+            max_pages=maxp,
+            no_new_data_pages_threshold=self.config.get('ragic_no_new_data_pages_threshold')
         )
         logging.info(f"[fetch_ragic_data_for_sheet] [{sheet_id}] 取得 {len(data)} 筆（local paged incremental）")
         return data
@@ -490,7 +395,7 @@ class ERPBackupManager:
         Raises:
             Exception: 當備份流程失敗時
         """
-        start_time = datetime.datetime.now()
+        start_time = datetime.now(timezone.utc)
         logging.info(f"開始執行 ERP 資料備份流程 - {start_time}")
 
         # 初始化 result 變數，避免 finally 區塊中找不到變數
@@ -512,16 +417,21 @@ class ERPBackupManager:
                 failed_services = [k for k, v in connections.items() if not v]
                 raise Exception(f"服務連線失敗: {', '.join(failed_services)}")
 
-            # 獲取最後同步時間（單表用全表最大即可）
-            last_sync_time = self.get_last_sync_timestamp()
+            # 單表模式下，從 sheet_sync_state 獲取最後同步時間
+            sheet_code_for_sync = self.config.get('sheet_code') or '99' # 預設為 99
+            last_sync_time = self.uploader.get_last_sync_timestamp_by_sheet(sheet_code_for_sync)
             logging.info(f"最後同步時間: {last_sync_time}")
 
             # 單表模式：從 Ragic 獲取資料
-            ragic_data = self.fetch_ragic_data(last_sync_time)
+            ragic_data = self.fetch_ragic_data_for_sheet(
+                sheet_id=self.config['ragic_sheet_id'],
+                last_sync_time=last_sync_time,
+                last_modified_names=get_time_fields_for_sheet(sheet_code_for_sync)
+            )
 
             if not ragic_data:
                 logging.info("Ragic 無新資料需要備份")
-                end_time = datetime.datetime.now()
+                end_time = datetime.datetime.now(timezone.utc)
                 result = {
                     "status": "no_data",
                     "message": "Ragic 無新資料可以備份",
@@ -559,8 +469,8 @@ class ERPBackupManager:
                 result = {
                     "status": "no_valid_data",
                     "start_time": start_time.isoformat(),
-                    "end_time": datetime.datetime.now().isoformat(),
-                    "duration_seconds": (datetime.datetime.now() - start_time).total_seconds(),
+                    "end_time": datetime.datetime.now(timezone.utc).isoformat(),
+                    "duration_seconds": (datetime.datetime.now(timezone.utc) - start_time).total_seconds(),
                     "records_fetched": len(ragic_data),
                     "records_processed": 0
                 }
@@ -588,7 +498,7 @@ class ERPBackupManager:
             upload_result = self.upload_to_bigquery(transformed_data)
 
             # 計算總耗時
-            end_time = datetime.datetime.now()
+            end_time = datetime.datetime.now(timezone.utc)
             duration = (end_time - start_time).total_seconds()
 
             # 整合結果（單表）
@@ -640,7 +550,7 @@ class ERPBackupManager:
             return result
 
         except Exception as e:
-            end_time = datetime.datetime.now()
+            end_time = datetime.datetime.now(timezone.utc)
             duration = (end_time - start_time).total_seconds()
             error_msg = f"備份失敗 - 耗時: {duration:.2f} 秒, 錯誤: {str(e)}"
             logging.error(error_msg)
@@ -763,7 +673,7 @@ class ERPBackupManager:
 
     def run_backup_all_sheets(self) -> Dict[str, Any]:
         """多表流程：依固定 9 張表（或環境變數提供）進行一週增量抓取、轉換、上傳並彙總。"""
-        start_time = datetime.datetime.now()
+        start_time = datetime.now(timezone.utc)
         logging.info(f"開始執行 ERP 多表備份流程 - {start_time}")
 
         result = {
@@ -775,19 +685,6 @@ class ERPBackupManager:
         # 9 張表對照（可由外部設定覆蓋）
         sheets = self._get_sheet_map()
 
-        per_sheet_names = {
-            # 將 Ragic 系統欄位 _ragicModified 放在第一順位，提升增量判定穩定度
-            'forms8/5': ['_ragicModified', '最後修改日期', '最後修改時間', '更新時間', '最後更新時間'],
-            'forms8/4': ['_ragicModified', '最後修改日期', '最後修改時間', '更新時間', '最後更新時間'],
-            'forms8/7': ['_ragicModified', '最後修改時間', '最後修改日期', '更新時間', '最後更新時間'],
-            'forms8/1': ['_ragicModified', '最後修改日期', '最後修改時間', '更新時間', '最後更新時間'],
-            'forms8/6': ['_ragicModified', '最後修改日期', '最後修改時間', '更新時間', '最後更新時間'],
-            'forms8/17': ['_ragicModified', '最後修改日期', '最後修改時間', '更新時間', '最後更新時間'],
-            'forms8/2': ['_ragicModified', '最後修改日期', '最後修改時間', '更新時間', '最後更新時間'],
-            'forms8/9': ['_ragicModified', '最後修改日期', '最後修改時間', '更新時間', '最後更新時間'],
-            'forms8/3': ['_ragicModified', '最後修改日期', '最後修改時間', '更新時間', '最後更新時間'],
-        }
-
         # 連線與最後同步時間
         try:
             self.initialize_clients()
@@ -796,24 +693,12 @@ class ERPBackupManager:
                 failed_services = [k for k, v in connections.items() if not v]
                 raise Exception(f"服務連線失敗: {', '.join(failed_services)}")
 
-            # 依各表的最後同步時間抓增量，避免因其他表時間較新導致本表被誤判為無新資料
-            # 若表內無資料，退回一週前
-            def _last_sync_for(sc: str) -> str:
-                try:
-                    return self.uploader.get_last_sync_timestamp_by_sheet(
-                        self.config['bigquery_dataset'],
-                        self.config['bigquery_table'],
-                        sc
-                    )
-                except Exception:
-                    return self.get_last_sync_timestamp()
-
-            last_sync_time = self.get_last_sync_timestamp()
-            logging.info(f"最後同步時間: {last_sync_time}")
+            
 
             total_uploaded = 0
             total_invalid = 0
             details: List[Dict[str, Any]] = []
+            all_fetched_records: Dict[str, List[Dict[str, Any]]] = {} # 儲存原始抓取到的記錄
 
             # 逐表處理
             for sheet_code, sheet_id in sheets.items():
@@ -821,21 +706,22 @@ class ERPBackupManager:
                     # 規則：若設 FORCE_SINCE_DAYS/ISO 則覆蓋 per-sheet；否則使用 per-sheet last sync。
                     force_iso = os.environ.get('FORCE_SINCE_ISO')
                     force_days = os.environ.get('FORCE_SINCE_DAYS')
-                    if force_iso or force_days:
-                        ls = self.get_last_sync_timestamp()  # 僅用來取得格式，不實際使用
-                        # 將覆蓋視窗傳入 fetch_ragic_data_for_sheet
-                        # 透過 last_sync_time 參數覆寫
-                        if force_iso:
-                            ls = force_iso.replace('Z', '')
-                        elif force_days:
-                            try:
-                                days = int(force_days)
-                                dt = datetime.datetime.now() - datetime.timedelta(days=days)
-                                ls = dt.strftime('%Y/%m/%d %H:%M:%S')
-                            except Exception:
-                                pass
+                    ls: datetime.datetime # 確保 ls 是 datetime 物件
+
+                    if force_iso:
+                        ls = datetime.datetime.fromisoformat(force_iso.replace('Z', '+00:00')).astimezone(timezone.utc)
+                    elif force_days:
+                        days = int(force_days)
+                        ls = datetime.datetime.now(timezone.utc) - datetime.timedelta(days=days)
                     else:
-                        ls = _last_sync_for(sheet_code)
+                        # 從 sheet_sync_state 獲取最後同步時間
+                        ls = self.uploader.get_last_sync_timestamp_by_sheet(sheet_code)
+
+                    logging.info(f"[Sheet {sheet_code}] 使用的最後同步時間 (UTC): {ls.isoformat()}")
+
+                    # 獲取該表單專屬的時間欄位清單
+                    last_modified_names_for_sheet = get_time_fields_for_sheet(sheet_code)
+                    logging.info(f"[Sheet {sheet_code}] 使用的時間欄位: {last_modified_names_for_sheet}")
 
                     # 切換：若 USE_RAGIC_WHERE=true，改用伺服端 where（避免排序影響）
                     use_where = os.environ.get('USE_RAGIC_WHERE', 'false').lower() == 'true'
@@ -847,27 +733,40 @@ class ERPBackupManager:
                             'forms8/3': os.environ.get('RAGIC_WHERE_FIELD_99'),
                         }
                         wfield = per_sheet_where.get(sheet_id) or os.environ.get('RAGIC_WHERE_FIELD')
-                        records = self.ragic_client.fetch_data(sheet_id, last_sync_time=ls, limit=per_limit, max_pages=1, where_field=wfield)
+                        # fetch_data 期望 Ragic 格式字串
+                        records = self.ragic_client.fetch_data(sheet_id, last_sync_time=ls.strftime('%Y/%m/%d %H:%M:%S'), limit=per_limit, max_pages=1, where_field=wfield)
                     else:
                         records = self.fetch_ragic_data_for_sheet(
                             sheet_id=sheet_id,
                             last_sync_time=ls,
-                            last_modified_names=per_sheet_names.get(sheet_id),
+                            last_modified_names=last_modified_names_for_sheet,
                             limit=None,
                             max_pages=None
                         )
 
+                    # 如果是測試模式，只抓取資料並返回
+                    if self.config.get('test_fetch_only'):
+                        details.append({
+                            'sheet_code': sheet_code,
+                            'sheet_name': sheet_code,
+                            'fetched': len(records),
+                            'last_sync_used': ls.isoformat(),
+                            'records_sample': records[:5] # 只取前5筆作為樣本
+                        })
+                        all_fetched_records[sheet_code] = records
+                        continue # 跳過轉換和上傳
+
                     # 若仍為 0：在啟用 skip_if_no_recent_days 時直接跳過；否則保留原先煙霧測試
                     if not records:
                         # 精準邏輯：無新資料即跳過，不做煙霧測試
-                        logging.info(f"{sheet_code} 無新資料，跳過上傳（last_sync_used={ls})")
+                        logging.info(f"{sheet_code} 無新資料，跳過上傳（last_sync_used={ls.isoformat()})")
                         details.append({
                             'sheet_code': sheet_code,
                             'sheet_name': sheet_code,
                             'uploaded': 0,
                             'invalid': 0,
                             'fetched': 0,
-                            'last_sync_used': ls,
+                            'last_sync_used': ls.isoformat(),
                             'skipped': True,
                             'reason': 'no_new_data'
                         })
@@ -888,16 +787,22 @@ class ERPBackupManager:
                         )
                         uploaded = up_res.get('records_processed', len(transformed))
 
-                    total_uploaded += uploaded
-                    total_invalid += invalid
-                    details.append({
-                        'sheet_code': sheet_code,
-                        'sheet_name': sheet_code,
-                        'uploaded': uploaded,
-                        'invalid': invalid,
-                        'fetched': len(records),
-                        'last_sync_used': ls
-                    })
+                    # 成功上傳後，更新 sheet_sync_state
+                        if up_res.get('status') == 'success':
+                            # 找出這批資料中最新的時間戳
+                            latest_timestamp_in_batch = None
+                            for record in transformed:
+                                for field_name in last_modified_names_for_sheet:
+                                    if field_name in record and record[field_name]:
+                                        dt = self.ragic_client._parse_dt(record[field_name])
+                                        if dt and (latest_timestamp_in_batch is None or dt > latest_timestamp_in_batch):
+                                            latest_timestamp_in_batch = dt
+                                            break # 找到一個有效時間就跳出內層循環
+
+                            if latest_timestamp_in_batch:
+                                self.uploader.update_sync_timestamp(sheet_code, latest_timestamp_in_batch)
+                            else:
+                                logging.warning(f"未能在上傳資料中找到有效時間戳來更新 sheet_sync_state ({sheet_code})")
 
                 except Exception as se:
                     logging.error(f"處理表 {sheet_code} 失敗: {se}")
@@ -907,11 +812,11 @@ class ERPBackupManager:
                         'uploaded': 0,
                         'invalid': 0,
                         'fetched': 0,
-                        'last_sync_used': ls if 'ls' in locals() else None,
+                        'last_sync_used': ls.isoformat() if 'ls' in locals() else None,
                         'error': str(se)
                     })
 
-            end_time = datetime.datetime.now()
+            end_time = datetime.datetime.now(timezone.utc)
             duration = (end_time - start_time).total_seconds()
 
             status = 'success' if total_uploaded > 0 else 'no_data'
@@ -922,14 +827,17 @@ class ERPBackupManager:
                 'duration_seconds': duration,
                 'records_processed': total_uploaded,
                 'invalid_records': total_invalid,
-                'last_sync_time': last_sync_time,
                 'details': details
             }
             logging.info(f"多表備份完成，共上傳 {total_uploaded} 筆，無效 {total_invalid} 筆")
-            return result
+
+            if self.config.get('test_fetch_only'):
+                return {'result': result, 'fetched_records': all_fetched_records}
+            else:
+                return result
 
         except Exception as e:
-            end_time = datetime.datetime.now()
+            end_time = datetime.datetime.now(timezone.utc)
             duration = (end_time - start_time).total_seconds()
             logging.error(f"多表備份失敗: {e}")
             return {
@@ -967,6 +875,7 @@ def load_config_from_env() -> Dict[str, Any]:
         'ragic_max_retries': int(os.environ.get('RAGIC_MAX_RETRIES', 3)),
         'ragic_page_size': int(os.environ.get('RAGIC_PAGE_SIZE', 1000)),
         'ragic_max_pages': int(os.environ.get('RAGIC_MAX_PAGES', 50)),
+        'ragic_no_new_data_pages_threshold': int(os.environ.get('RAGIC_NO_NEW_DATA_PAGES_THRESHOLD', 2)),
         'last_modified_field_names': os.environ.get('LAST_MODIFIED_FIELD_NAMES'),
         # sheet 對照設定
         'sheet_map_json': os.environ.get('SHEET_MAP_JSON'),
@@ -992,7 +901,8 @@ def load_config_from_env() -> Dict[str, Any]:
         'smtp_from_email': os.environ.get('SMTP_FROM_EMAIL'),
         'smtp_from_password': os.environ.get('SMTP_FROM_PASSWORD'),
         'smtp_server': os.environ.get('SMTP_SERVER', 'smtp.gmail.com'),
-        'smtp_port': int(os.environ.get('SMTP_PORT', 587))
+        'smtp_port': int(os.environ.get('SMTP_PORT', 587)),
+        'test_fetch_only': os.environ.get('TEST_FETCH_ONLY', 'false').lower() == 'true' # New flag
     }
 
     return config
@@ -1011,7 +921,18 @@ def main():
 
         # 若 RAGIC_SHEET_ID 設為 ALL，走多表流程；否則走單表
         if (config.get('ragic_sheet_id') or '').upper() == 'ALL':
-            result = backup_manager.run_backup_all_sheets()
+            if config.get('test_fetch_only'):
+                test_result = backup_manager.run_backup_all_sheets()
+                result = test_result['result']
+                fetched_records = test_result['fetched_records']
+                print("\n--- 測試模式：已抓取資料 ---")
+                for sheet_code, records in fetched_records.items():
+                    print(f"表單 {sheet_code} 抓取到 {len(records)} 筆資料。")
+                    if records:
+                        print(f"  前 3 筆資料範例: {json.dumps(records[:3], indent=2, ensure_ascii=False)}")
+                print("---------------------------\n")
+            else:
+                result = backup_manager.run_backup_all_sheets()
         else:
             # 允許為單表指定 sheet_code 以利 email details 顯示
             try:

@@ -1,0 +1,42 @@
+# Git 和版本控制
+.git/
+.gitignore
+
+# 測試和文件（11GB+ 資料）
+test/
+documents/
+Manual_fetch_all_Ragic/
+
+# IDE 和編輯器
+.claude/
+.serena/
+.vscode/
+.idea/
+
+# Python 環境和快取
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+.cache/
+.pytest_cache/
+
+# 資料和日誌
+.data/
+*.log
+upload_*.log
+deploy_out.txt
+
+# 環境變數（不部署，使用 Cloud Function 環境變數）
+.env
+.env.*
+
+# macOS 系統檔案
+.DS_Store
+
+# SQL 腳本（不需要）
+sql/
+
+# 其他大型檔案
+sheet_map.json

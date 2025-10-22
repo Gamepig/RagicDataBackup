@@ -110,3 +110,26 @@ Tasks.md
 # Ignore GCP SA keys
 ragic-backup-test-sa-key.json
 *sa-key.json
+
+# Project-specific environment configs
+.env.*.yaml
+env_vars.yaml
+
+# Local data and cache
+.data/
+.cache/
+
+# Serena IDE files
+.serena/
+
+# Manual fetch tools and data (can be very large)
+Manual_fetch_all_Ragic/
+
+# Build and run outputs
+deploy_out.txt
+final_test_output.txt
+function_test_output.txt
+function_trigger_output.txt
+redeploy_out.txt
+upload_99_log.txt
+*.pdf

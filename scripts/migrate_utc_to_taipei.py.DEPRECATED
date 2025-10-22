@@ -1,0 +1,79 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+BigQuery 時區遷移腳本：UTC → 台北時間（UTC+8）
+
+將 erp_backup.ragic_data 表中的所有 TIMESTAMP 欄位 +8 小時
+"""
+
+from google.cloud import bigquery
+import logging
+import os
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+def migrate_timezone():
+    """執行 UTC 到台北時間的遷移"""
+
+    project_id = os.environ.get('GCP_PROJECT_ID', 'b25h01-ragic')
+    dataset_id = os.environ.get('BIGQUERY_DATASET', 'erp_backup')
+    table_id = os.environ.get('BIGQUERY_TABLE', 'ragic_data')
+
+    client = bigquery.Client(project=project_id)
+    table_ref = f"{project_id}.{dataset_id}.{table_id}"
+
+    logging.info(f"開始遷移 {table_ref} 的時區（UTC → 台北時間 UTC+8）")
+
+    # 步驟 1：檢查資料量
+    count_query = f"SELECT COUNT(*) as total FROM `{table_ref}`"
+    count_result = client.query(count_query).result()
+    total_rows = list(count_result)[0].total
+    logging.info(f"總資料筆數: {total_rows}")
+
+    # 步驟 2：備份確認
+    logging.warning("⚠️  請確認已備份資料表！此操作不可逆。")
+    logging.info("備份表名: ragic_data_backup_utc_20251022_112723")
+    confirm = input("確認要繼續嗎？(yes/no): ")
+    if confirm.lower() != 'yes':
+        logging.info("使用者取消操作")
+        return
+
+    # 步驟 3：執行更新（+8 小時）
+    update_query = f"""
+    UPDATE `{table_ref}`
+    SET
+        created_at = TIMESTAMP_ADD(created_at, INTERVAL 8 HOUR),
+        updated_at = TIMESTAMP_ADD(updated_at, INTERVAL 8 HOUR),
+        last_modified_date = TIMESTAMP_ADD(last_modified_date, INTERVAL 8 HOUR)
+    WHERE TRUE
+    """
+
+    logging.info("開始執行更新...")
+    logging.info(f"SQL: {update_query}")
+
+    query_job = client.query(update_query)
+    result = query_job.result()
+
+    logging.info(f"✅ 更新完成！受影響的資料筆數: {query_job.num_dml_affected_rows}")
+
+    # 步驟 4：驗證更新結果
+    verify_query = f"""
+    SELECT
+        sheet_code,
+        last_modified_date,
+        created_at,
+        updated_at
+    FROM `{table_ref}`
+    WHERE sheet_code = '50'
+    ORDER BY last_modified_date DESC
+    LIMIT 5
+    """
+
+    logging.info("驗證更新結果...")
+    verify_result = client.query(verify_query).result()
+
+    for row in verify_result:
+        logging.info(f"Sheet {row.sheet_code}: last_modified_date={row.last_modified_date}")
+
+if __name__ == '__main__':
+    migrate_timezone()

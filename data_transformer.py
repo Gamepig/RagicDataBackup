@@ -9,9 +9,12 @@
 
 import logging
 import json
-from datetime import datetime
+from datetime import datetime, date, timezone
 from typing import List, Dict, Any, Optional, Set
 from google.cloud import bigquery
+import zoneinfo # For robust timezone handling
+
+TAIPEI_TZ = zoneinfo.ZoneInfo("Asia/Taipei")
 
 # 導入新的配置模組
 try:
@@ -636,10 +639,10 @@ class DataTransformer:
                     pass
         raise ValueError(f"無法解析日期: {value}")
 
-    def _normalize_timestamp(self, value: str) -> str:
+    def _normalize_timestamp(self, value: str) -> datetime:
         """
-        將常見日期時間格式正規化為 ISO 8601（YYYY-MM-DDTHH:MM:SS）
-        （不附時區，BigQuery 視為 UTC）
+        將常見日期時間格式正規化為 UTC datetime 物件。
+        如果輸入時間沒有時區資訊，則假定為 Asia/Taipei 時區。
         """
         if not isinstance(value, str):
             raise ValueError("時間戳欄位必須是字串")
@@ -647,6 +650,10 @@ class DataTransformer:
         v = value.strip()
         if v in {"不指定", "N/A", "NA", "-", "—", "null", "None", "ADDLINE"}:
             raise ValueError(f"無法解析時間戳: {value}")
+
+        dt_naive: Optional[datetime] = None
+
+        # 嘗試解析常見格式
         candidates = [
             "%Y-%m-%d %H:%M:%S",
             "%Y/%m/%d %H:%M:%S",
@@ -657,26 +664,42 @@ class DataTransformer:
         ]
         for fmt in candidates:
             try:
-                dt = datetime.strptime(v, fmt)
-                # 若僅日期提供則補 00:00:00
-                return dt.strftime("%Y-%m-%dT%H:%M:%S")
+                dt_naive = datetime.strptime(v, fmt)
+                break
             except ValueError:
                 continue
+
         # 支援 14 碼數字時間戳（YYYYMMDDHHMMSS）
-        if v.isdigit() and len(v) == 14:
+        if dt_naive is None and v.isdigit() and len(v) == 14:
             try:
-                dt = datetime.strptime(v, "%Y%m%d%H%M%S")
-                return dt.strftime("%Y-%m-%dT%H:%M:%S")
+                dt_naive = datetime.strptime(v, "%Y%m%d%H%M%S")
             except ValueError:
                 pass
-        # 常見的 ISO 格式直接返回
-        try:
-            # 若已是 ISO 8601，嘗試解析
-            dt = datetime.fromisoformat(v.replace("Z", ""))
-            return dt.strftime("%Y-%m-%dT%H:%M:%S")
-        except ValueError:
-            pass
-        raise ValueError(f"無法解析時間戳: {value}")
+
+        # 常見的 ISO 格式直接解析
+        if dt_naive is None:
+            try:
+                # datetime.fromisoformat 可以處理帶時區的 ISO 格式
+                # 將 Z 替換為 +00:00，以便 fromisoformat 正確處理 UTC
+                dt_parsed = datetime.fromisoformat(v.replace("Z", "+00:00"))
+                if dt_parsed.tzinfo is None: # 如果是 naive ISO 格式
+                    dt_naive = dt_parsed
+                else: # 如果已經帶有時區資訊，直接轉換為 UTC
+                    return dt_parsed.astimezone(timezone.utc)
+            except ValueError:
+                pass
+
+        if dt_naive is None:
+            raise ValueError(f"無法解析時間戳: {value}")
+
+        # 如果解析出的時間是 naive，則假定為 Asia/Taipei 時區，然後轉換為 UTC
+        if dt_naive.tzinfo is None:
+            dt_localized = dt_naive.replace(tzinfo=TAIPEI_TZ) # Localize to Taipei
+            dt_utc = dt_localized.astimezone(timezone.utc) # Convert to UTC
+            return dt_utc
+        else:
+            # 如果已經帶有時區資訊，直接轉換為 UTC
+            return dt_naive.astimezone(timezone.utc)
 
     def _validate_required_fields(self, record: Dict[str, Any], index: int) -> bool:
         """

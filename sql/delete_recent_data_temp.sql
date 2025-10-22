@@ -1,0 +1,1 @@
+DELETE FROM `b25h01-ragic.erp_backup.ragic_data` WHERE last_modified_date >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 DAY) OR created_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 DAY)

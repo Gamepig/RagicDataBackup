@@ -5,7 +5,8 @@ import requests
 import logging
 import time
 from typing import List, Dict, Any, Optional
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
+from data_transformer import TAIPEI_TZ # For robust timezone handling
 
 
 class RagicClient:
@@ -103,7 +104,7 @@ class RagicClient:
         不要求 200，常見 401/403/404 也代表網路與主機可達。
         """
         try:
-            resp = self.session.get(self.base_url, timeout=5)
+            resp = self.session.get(self.base_url, timeout=self.timeout)
             logging.info(f"Ragic ping {self.base_url} -> {resp.status_code}")
             return resp.status_code in (200, 301, 302, 401, 403, 404)
         except Exception as e:
@@ -122,17 +123,37 @@ class RagicClient:
         if not value:
             return None
         s = str(value).strip()
+        dt_naive: Optional[datetime] = None
+
         try:
+            # Try ISO format first, including timezone-aware
             if 'T' in s:
-                return datetime.fromisoformat(s.replace('Z', '+00:00')).replace(tzinfo=None)
+                dt_parsed = datetime.fromisoformat(s.replace('Z', '+00:00'))
+                if dt_parsed.tzinfo is None: # If naive ISO
+                    dt_naive = dt_parsed
+                else: # If already timezone-aware, convert to UTC
+                    return dt_parsed.astimezone(timezone.utc)
         except Exception:
             pass
+
+        # Try common patterns
         for p in self._DT_PATTERNS:
             try:
-                return datetime.strptime(s, p)
+                dt_naive = datetime.strptime(s, p)
+                break
             except Exception:
                 continue
-        return None
+
+        if dt_naive is None:
+            return None # Could not parse
+
+        # If parsed datetime is naive, assume Taipei and convert to UTC
+        if dt_naive.tzinfo is None:
+            dt_localized = dt_naive.replace(tzinfo=TAIPEI_TZ)
+            return dt_localized.astimezone(timezone.utc)
+        else:
+            # Should not happen if fromisoformat handled it, but as a safeguard
+            return dt_naive.astimezone(timezone.utc)
 
     def fetch_since_local_paged(
         self,
@@ -142,31 +163,33 @@ class RagicClient:
         until_dt: Optional[datetime] = None,
         limit: int = 1000,
         max_pages: int = 50,
-        order_by_field: str = "_ragicModified"
+        no_new_data_pages_threshold: int = 2 # 連續無新資料頁面閾值
     ) -> List[Dict[str, Any]]:
         """
         不使用 where，改以本地過濾增量且有頁面延伸規則：
         - 逐頁抓取，僅以 max_pages 與「不足一頁」為停止條件（避免因排序差異提早停止）。
         - 若整頁皆無法解析日期，為避免無限迴圈，只抓第一頁即停止。
+        - 引入 no_new_data_pages_threshold，實現智慧提前停止。
         """
         # 詳細 logging 診斷
         logging.info(f"[fetch_since_local_paged] 開始抓取 {sheet_id}")
-        logging.info(f"[fetch_since_local_paged] since_dt={since_dt.strftime('%Y-%m-%d %H:%M:%S')}")
+        logging.info(f"[fetch_since_local_paged] 原始 since_dt={since_dt.isoformat()}")
         if until_dt:
-            logging.info(f"[fetch_since_local_paged] until_dt={until_dt.strftime('%Y-%m-%d %H:%M:%S')}")
+            logging.info(f"[fetch_since_local_paged] until_dt={until_dt.isoformat()}")
         logging.info(f"[fetch_since_local_paged] 日期欄位: {last_modified_field_names}")
 
         collected: List[Dict[str, Any]] = []
         offset = 0
         pages = 0
         url = f'{self.base_url}/{sheet_id}'
+        consecutive_no_new_data_pages = 0 # 連續無新資料頁面計數
 
         while pages < max_pages:
             pages += 1
             params = {'api': '', 'v': 3, 'limit': limit, 'offset': offset}
-            # 以最後修改欄位遞減排序，利於本地時間窗過濾並可提前停止
-            if order_by_field:
-                params['orderBy'] = f"{order_by_field},desc"
+            # 強制使用 _ragicId 進行遞增排序
+            params['orderBy'] = '_ragicId,asc'
+
             try:
                 r = self.session.get(url, params=params, timeout=self.timeout)
                 r.raise_for_status()
@@ -190,8 +213,7 @@ class RagicClient:
                 break
 
             any_parsed = False
-            page_has_older_or_equal = False
-            page_collected = 0
+            page_new_data_count = 0 # 記錄本頁符合原始 since_dt 的新資料筆數
             first_rec_dt = None
             last_rec_dt = None
 
@@ -207,24 +229,32 @@ class RagicClient:
                                 first_rec_dt = dt
                             last_rec_dt = dt
                             break
+
+                # 比較時使用原始的 since_dt (UTC)
                 if dt and until_dt and dt > until_dt:
                     # 超過上界，不納入
                     pass
-                elif dt and dt > since_dt:
+                elif dt and dt >= since_dt:  # 比較原始 since_dt，允許相等時間（MERGE 會去重）
                     collected.append(rec)
-                    page_collected += 1
-                elif dt and dt <= since_dt:
-                    # 已遇到不新於 since 的資料（在遞減排序下可提前停止）
-                    page_has_older_or_equal = True
+                    page_new_data_count += 1
+                # else: 資料比原始 since_dt 舊，不處理
 
             # 詳細記錄每頁處理結果
             if first_rec_dt:
-                logging.info(f"[fetch_since_local_paged] 第 {pages} 頁日期範圍: {first_rec_dt.strftime('%Y-%m-%d %H:%M:%S')} ~ {last_rec_dt.strftime('%Y-%m-%d %H:%M:%S')}")
-            logging.info(f"[fetch_since_local_paged] 第 {pages} 頁符合條件: {page_collected} 筆")
+                logging.info(f"[fetch_since_local_paged] 第 {pages} 頁日期範圍: {first_rec_dt.isoformat()} ~ {last_rec_dt.isoformat()}")
+            logging.info(f"[fetch_since_local_paged] 第 {pages} 頁符合原始 since_dt 條件: {page_new_data_count} 筆")
 
-            # 若遇到舊資料且已排序，提前結束
-            if page_has_older_or_equal:
-                logging.info(f"[fetch_since_local_paged] 第 {pages} 頁遇到舊資料，提前停止")
+            # 智慧提前停止邏輯
+            # 由於現在是按 _ragicId 遞增排序，如果一頁中沒有任何新資料，
+            # 則可以合理推斷後續頁面也不會有新資料，因此可以提前停止。
+            if page_new_data_count == 0:
+                consecutive_no_new_data_pages += 1
+                logging.info(f"[fetch_since_local_paged] 連續無新資料頁面計數: {consecutive_no_new_data_pages}")
+            else:
+                consecutive_no_new_data_pages = 0
+
+            if consecutive_no_new_data_pages >= no_new_data_pages_threshold:
+                logging.info(f"[fetch_since_local_paged] 連續 {no_new_data_pages_threshold} 頁無新資料，提前停止抓取")
                 break
 
             if len(data) < limit:

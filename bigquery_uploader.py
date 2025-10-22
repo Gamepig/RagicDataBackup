@@ -10,7 +10,8 @@ import uuid
 from typing import List, Dict, Any, Optional, Tuple
 from google.cloud import bigquery
 from google.cloud.exceptions import NotFound, Conflict
-from data_transformer import BIGQUERY_SCHEMA
+from data_transformer import BIGQUERY_SCHEMA, TAIPEI_TZ
+from datetime import timezone
 
 
 class BigQueryUploader:
@@ -511,80 +512,97 @@ class BigQueryUploader:
             else:
                 raise Exception(error_message)
 
-    def get_last_sync_timestamp(self, dataset_id: str, table_id: str) -> str:
+    def get_last_sync_timestamp_by_sheet(self, sheet_code: str) -> datetime.datetime:
         """
-        從 BigQuery 獲取最後一次同步時間
+        依 sheet_code 從 BigQuery 的 sheet_sync_state 表取得最後同步時間，並轉換為 UTC datetime 物件。
+        如果表中無記錄，則返回一週前的 UTC 時間。
 
         Args:
-            dataset_id: 資料集 ID
-            table_id: 資料表 ID
+            sheet_code: Sheet 代碼 (e.g., '10', '99')
 
         Returns:
-            str: Ragic 格式的日期時間 (yyyy/MM/dd HH:mm:ss)
+            datetime.datetime: UTC datetime 物件。
         """
+        sync_state_table_ref = f"{self.project_id}.ragic_backup.sheet_sync_state"
+        default_last_sync = datetime.now(timezone.utc) - datetime.timedelta(weeks=1)
+
         try:
-            table_ref = f"{self.project_id}.{dataset_id}.{table_id}"
             query = f"""
-            SELECT MAX(COALESCE(last_modified_date, updated_at, created_at)) as last_sync
-            FROM `{table_ref}`
-            WHERE COALESCE(last_modified_date, updated_at, created_at) IS NOT NULL
-            """
-
-            query_job = self.client.query(query)
-            result = query_job.result()
-
-            for row in result:
-                if row.last_sync:
-                    # 轉為 Ragic 要求的日期格式
-                    ragic_format = row.last_sync.strftime('%Y/%m/%d %H:%M:%S')
-                    logging.info(f"獲取到最後同步時間: {ragic_format}")
-                    return ragic_format
-
-            # 如果沒有資料，返回一週前
-            last_week = datetime.datetime.now() - datetime.timedelta(weeks=1)
-            ragic_format = last_week.strftime('%Y/%m/%d %H:%M:%S')
-            logging.info(f"資料表為空，使用預設時間: {ragic_format}")
-            return ragic_format
-
-        except Exception as e:
-            logging.warning(f"無法獲取最後同步時間: {e}，使用預設值（一週前）")
-            last_week = datetime.datetime.now() - datetime.timedelta(weeks=1)
-            return last_week.strftime('%Y/%m/%d %H:%M:%S')
-
-    def get_last_sync_timestamp_by_sheet(self, dataset_id: str, table_id: str, sheet_code: str) -> str:
-        """
-        依 sheet_code 從 BigQuery 取得最後同步時間（避免使用全表最大時間導致其他表全數被跳過）。
-
-        Returns Ragic 格式 yyyy/MM/dd HH:mm:ss；若無資料，回傳一週前。
-        """
-        try:
-            table_ref = f"{self.project_id}.{dataset_id}.{table_id}"
-            query = f"""
-            SELECT MAX(COALESCE(last_modified_date, updated_at, created_at)) as last_sync
-            FROM `{table_ref}`
+            SELECT last_sync_timestamp
+            FROM `{sync_state_table_ref}`
             WHERE sheet_code = @sheet_code
-              AND COALESCE(last_modified_date, updated_at, created_at) IS NOT NULL
             """
             qcfg = bigquery.QueryJobConfig(query_parameters=[
                 bigquery.ScalarQueryParameter('sheet_code', 'STRING', sheet_code)
             ])
             result = self.client.query(query, job_config=qcfg).result()
+
             for row in result:
-                if row.last_sync:
-                    # BigQuery TIMESTAMP 是 UTC，需轉換為台北時間（UTC+8）給 Ragic API 使用
-                    taipei_time = row.last_sync + datetime.timedelta(hours=8)
-                    logging.info(f"[sheet {sheet_code}] 最後同步時間（UTC）: {row.last_sync.strftime('%Y/%m/%d %H:%M:%S')}")
-                    logging.info(f"[sheet {sheet_code}] 最後同步時間（台北）: {taipei_time.strftime('%Y/%m/%d %H:%M:%S')}")
-                    return taipei_time.strftime('%Y/%m/%d %H:%M:%S')
-            # 無歷史資料時，也需轉換為台北時間
-            last_week_utc = datetime.datetime.now() - datetime.timedelta(weeks=1)
-            last_week_taipei = last_week_utc + datetime.timedelta(hours=8)
-            logging.info(f"[sheet {sheet_code}] 無歷史資料，使用一週前（台北時間）: {last_week_taipei.strftime('%Y/%m/%d %H:%M:%S')}")
-            return last_week_taipei.strftime('%Y/%m/%d %H:%M:%S')
+                if row.last_sync_timestamp:
+                    dt_from_bq = row.last_sync_timestamp
+                    # BigQuery TIMESTAMP 欄位通常是 UTC 且帶有時區資訊
+                    if dt_from_bq.tzinfo is None:
+                        # 如果是 naive datetime，假設為 UTC
+                        dt_utc = dt_from_bq.replace(tzinfo=timezone.utc)
+                    else:
+                        dt_utc = dt_from_bq.astimezone(timezone.utc)
+                    logging.info(f"[Sheet {sheet_code}] 從 sheet_sync_state 獲取到最後同步時間（UTC）: {dt_utc.isoformat()}")
+                    return dt_utc
+
+            logging.info(f"[Sheet {sheet_code}] sheet_sync_state 無記錄，使用預設時間（UTC 一週前）: {default_last_sync.isoformat()}")
+            return default_last_sync
+
+        except NotFound:
+            logging.warning(f"[Sheet {sheet_code}] sheet_sync_state 表不存在或無記錄，使用預設時間（UTC 一週前）")
+            return default_last_sync
         except Exception as e:
-            logging.warning(f"無法依表取得最後同步時間（{sheet_code}）: {e}，使用一週前")
-            last_week = datetime.datetime.now() - datetime.timedelta(weeks=1)
-            return last_week.strftime('%Y/%m/%d %H:%M:%S')
+            logging.warning(f"無法從 sheet_sync_state 獲取最後同步時間（{sheet_code}）: {e}，使用預設值（UTC 一週前）")
+            return default_last_sync
+
+    def update_sync_timestamp(self, sheet_code: str, new_timestamp: datetime.datetime):
+        """
+        更新 BigQuery 中 sheet_sync_state 表的最後同步時間。
+        使用 MERGE 操作來插入或更新記錄。
+
+        Args:
+            sheet_code: Sheet 代碼。
+            new_timestamp: 新的最後同步時間 (UTC datetime 物件)。
+        """
+        sync_state_table_ref = f"{self.project_id}.ragic_backup.sheet_sync_state"
+        
+        # 確保 new_timestamp 是 timezone-aware UTC
+        if new_timestamp.tzinfo is None:
+            new_timestamp = new_timestamp.replace(tzinfo=timezone.utc)
+        else:
+            new_timestamp = new_timestamp.astimezone(timezone.utc)
+
+        # 將 datetime 物件轉換為 BigQuery TIMESTAMP 字符串格式
+        timestamp_str = new_timestamp.isoformat(timespec='microseconds')
+
+        query = f"""
+        MERGE `{sync_state_table_ref}` AS T
+        USING (SELECT @sheet_code AS sheet_code, @new_timestamp AS last_sync_timestamp, CURRENT_TIMESTAMP() AS updated_at) AS S
+        ON T.sheet_code = S.sheet_code
+        WHEN MATCHED THEN
+            UPDATE SET
+                last_sync_timestamp = S.last_sync_timestamp,
+                updated_at = S.updated_at
+        WHEN NOT MATCHED THEN
+            INSERT (sheet_code, last_sync_timestamp, updated_at)
+            VALUES (S.sheet_code, S.last_sync_timestamp, S.updated_at);
+        """
+        qcfg = bigquery.QueryJobConfig(query_parameters=[
+            bigquery.ScalarQueryParameter('sheet_code', 'STRING', sheet_code),
+            bigquery.ScalarQueryParameter('new_timestamp', 'TIMESTAMP', new_timestamp)
+        ])
+
+        try:
+            query_job = self.client.query(query, job_config=qcfg)
+            query_job.result()
+            logging.info(f"[Sheet {sheet_code}] sheet_sync_state 最後同步時間已更新為: {new_timestamp.isoformat()}")
+        except Exception as e:
+            logging.error(f"更新 sheet_sync_state 失敗（{sheet_code}）: {e}")
+            raise
 
     def test_connection(self) -> bool:
         """

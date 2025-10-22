@@ -308,7 +308,7 @@ class EmailNotifier:
         """
 
         if last_sync_time:
-            html += f'<div class="info-row"><strong>上次同步時間：</strong>{last_sync_time}</div>'
+            html += f'<div class="info-row"><strong>上次同步時間（台北時間）：</strong>{last_sync_time}</div>'
 
         if message:
             html += f'<div class="info-row"><strong>訊息：</strong>{message}</div>'
@@ -385,15 +385,17 @@ class EmailNotifier:
                   to_email: str,
                   subject: str,
                   html_content: str,
-                  text_content: str = None) -> bool:
+                  text_content: str = None,
+                  cc_emails: list = None) -> bool:
         """
         發送電子郵件
 
         Args:
-            to_email: 收件人電子郵件
+            to_email: 收件人電子郵件（主要收件人）
             subject: 郵件主旨
             html_content: HTML 內容
             text_content: 純文字內容（可選）
+            cc_emails: 副本收件人列表（可選）
 
         Returns:
             bool: 發送成功返回 True
@@ -408,6 +410,10 @@ class EmailNotifier:
             msg['From'] = self.from_email
             msg['To'] = to_email
             msg['Subject'] = subject
+            
+            # 添加副本收件人（若有）
+            if cc_emails:
+                msg['Cc'] = ', '.join(cc_emails)
 
             # 添加內容
             if text_content:
@@ -415,13 +421,21 @@ class EmailNotifier:
 
             msg.attach(MIMEText(html_content, 'html', 'utf-8'))
 
+            # 準備所有收件人列表（主收件人 + 副本）
+            all_recipients = [to_email]
+            if cc_emails:
+                all_recipients.extend(cc_emails)
+
             # 連接 SMTP 伺服器並發送
             with smtplib.SMTP(self.smtp_server, self.smtp_port) as server:
                 server.starttls()
                 server.login(self.from_email, self.from_password)
-                server.send_message(msg)
+                server.sendmail(self.from_email, all_recipients, msg.as_string())
 
-            logging.info(f"電子郵件發送成功 - 收件人: {to_email}")
+            recipient_info = f"收件人: {to_email}"
+            if cc_emails:
+                recipient_info += f", 副本: {', '.join(cc_emails)}"
+            logging.info(f"電子郵件發送成功 - {recipient_info}")
             return True
 
         except Exception as e:
@@ -563,6 +577,21 @@ def send_backup_notification(project_id: str,
             if len(brief_logs) >= 10:
                 break
 
+        # 針對常見英文錯誤提供中文說明
+        def explain_error_zh(msg: str) -> str:
+            if not msg:
+                return ""
+            m = msg.lower()
+            if "memory limit" in m and "exceeded" in m:
+                return "雲端函式記憶體不足，執行中被系統終止。建議：提高記憶體配額（例如 512Mi/1Gi），或改採單表序列處理以降低單次用量。"
+            if "malformed response" in m and "too much memory" in m:
+                return "執行過程因記憶體不足導致容器重啟，請調整記憶體或降低每次處理量（分頁/頁數）。"
+            if "alts creds ignored" in m:
+                return "此為資訊訊息（非錯誤），可忽略。"
+            if "sheet_map_json" in m and "parse" in m:
+                return "SHEET_MAP_JSON 解析失敗：請確認格式為有效 JSON 或改用 SHEET_MAP_FILE 注入。"
+            return ""
+
         # 簡版 HTML
         html_parts = []
         # 明亮主題（白底、紫色漸層標頭、淺綠結果區塊）
@@ -597,16 +626,39 @@ def send_backup_notification(project_id: str,
         if isinstance(details, list) and details:
             html_parts.append("<h3 style='margin-top:14px;'>各表備份筆數</h3>")
             html_parts.append("<table style='width:100%;border-collapse:collapse;font-size:14px'>")
-            html_parts.append("<thead><tr><th style='text-align:left;padding:8px;border-bottom:1px solid #e5e7eb'>sheet_code</th><th style='text-align:right;padding:8px;border-bottom:1px solid #e5e7eb'>uploaded</th><th style='text-align:right;padding:8px;border-bottom:1px solid #e5e7eb'>invalid</th></tr></thead>")
+            html_parts.append("<thead><tr><th style='text-align:left;padding:8px;border-bottom:1px solid #e5e7eb'>sheet_code</th><th style='text-align:left;padding:8px;border-bottom:1px solid #e5e7eb'>sheet_name</th><th style='text-align:left;padding:8px;border-bottom:1px solid #e5e7eb'>status</th><th style='text-align:right;padding:8px;border-bottom:1px solid #e5e7eb'>uploaded</th><th style='text-align:right;padding:8px;border-bottom:1px solid #e5e7eb'>invalid</th><th style='text-align:left;padding:8px;border-bottom:1px solid #e5e7eb'>error</th></tr></thead>")
             html_parts.append("<tbody>")
             for d in details:
                 sc = d.get('sheet_code', '')
+                sn = d.get('sheet_name', '')
                 up = d.get('uploaded', 0)
                 iv = d.get('invalid', 0)
-                html_parts.append(f"<tr><td style='padding:8px;border-bottom:1px solid #f3f4f6'>{sc}</td><td style='padding:8px;border-bottom:1px solid #f3f4f6;text-align:right'>{up}</td><td style='padding:8px;border-bottom:1px solid #f3f4f6;text-align:right'>{iv}</td></tr>")
+                st = '已更新' if (isinstance(up, int) and up > 0) else ('錯誤' if d.get('error') else '無新資料')
+                err = (str(d.get('error') or '')[:120])
+                html_parts.append(f"<tr><td style='padding:8px;border-bottom:1px solid #f3f4f6'>{sc}</td><td style='padding:8px;border-bottom:1px solid #f3f4f6'>{sn}</td><td style='padding:8px;border-bottom:1px solid #f3f4f6'>{st}</td><td style='padding:8px;border-bottom:1px solid #f3f4f6;text-align:right'>{up}</td><td style='padding:8px;border-bottom:1px solid #f3f4f6;text-align:right'>{iv}</td><td style='padding:8px;border-bottom:1px solid #f3f4f6'>{err}</td></tr>")
             html_parts.append("</tbody></table>")
         if status == 'error' and error_message:
             html_parts.append(f"<p style='color:#b91c1c'><strong>失敗原因：</strong>{error_message}</p>")
+            # 額外中文解釋（若可辨識）
+            zh = explain_error_zh(str(error_message))
+            if zh:
+                html_parts.append(f"<p style='color:#b91c1c'><strong>錯誤說明（中文）：</strong>{zh}</p>")
+            # 若備份結果帶有 diagnostics，顯示對外連線自我檢查結果
+            diag = backup_result.get('diagnostics') or {}
+            if isinstance(diag, dict) and diag:
+                html_parts.append("<h3 style='margin-top:14px;'>對外連線診斷</h3>")
+                html_parts.append("<table style='width:100%;border-collapse:collapse;font-size:14px'>")
+                html_parts.append("<thead><tr><th style='text-align:left;padding:8px;border-bottom:1px solid #e5e7eb'>target</th><th style='text-align:left;padding:8px;border-bottom:1px solid #e5e7eb'>status</th><th style='text-align:right;padding:8px;border-bottom:1px solid #e5e7eb'>elapsed(s)</th><th style='text-align:left;padding:8px;border-bottom:1px solid #e5e7eb'>detail</th></tr></thead>")
+                html_parts.append("<tbody>")
+                for k, v in diag.items():
+                    ok = v.get('ok')
+                    status = v.get('status')
+                    err = v.get('error')
+                    el = v.get('elapsed_s')
+                    st = ("OK " + str(status)) if ok else ("ERR")
+                    detail = str(err or '')
+                    html_parts.append(f"<tr><td style='padding:8px;border-bottom:1px solid #f3f4f6'>{k}</td><td style='padding:8px;border-bottom:1px solid #f3f4f6'>{st}</td><td style='padding:8px;border-bottom:1px solid #f3f4f6;text-align:right'>{el}</td><td style='padding:8px;border-bottom:1px solid #f3f4f6'>{detail[:200]}</td></tr>")
+                html_parts.append("</tbody></table>")
         if unbackup_ids:
             html_parts.append(f"<p><strong>未備份ID（前{min(len(unbackup_ids), 20)}筆）：</strong>{', '.join(unbackup_ids[:20])}</p>")
         else:
@@ -637,6 +689,10 @@ def send_backup_notification(project_id: str,
                     import json as _json
                     msg = _json.dumps(bl['json_payload'], ensure_ascii=False)
                 html_parts.append(f"<li>[{sv}] {ts} - {msg[:500]}</li>")
+                # 就地提供中文說明（若辨識）
+                zh = explain_error_zh(msg)
+                if zh:
+                    html_parts.append(f"<li style='color:#b91c1c'><em>{zh}</em></li>")
             html_parts.append("</ul>")
 
         html_parts.append("<p class='muted'>本郵件為系統自動通知。如需查詢完整未備份記錄，請使用 query_unbackup.py 以 batch_id 查詢。</p>")
@@ -644,11 +700,13 @@ def send_backup_notification(project_id: str,
         html_content = "".join(html_parts)
 
         # 發送郵件（錯誤狀態才允許重送一次）
-        sent = notifier.send_email(to_email, subject, html_content)
+        # 添加第二位收件者（副本）
+        cc_emails = ['gamepig1976@gmail.com']
+        sent = notifier.send_email(to_email, subject, html_content, cc_emails=cc_emails)
         if not sent and status == 'error':
             logging.info("備份發生錯誤，郵件重送一次")
             time.sleep(2)
-            sent = notifier.send_email(to_email, subject, html_content)
+            sent = notifier.send_email(to_email, subject, html_content, cc_emails=cc_emails)
         return sent
 
     except Exception as e:
