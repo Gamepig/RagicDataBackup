@@ -1,0 +1,86 @@
+# Cursor AI Rules for RagicDataBackup Project
+
+## 🎯 Primary Guideline Document
+
+**READ CLAUDE.md FIRST AND ALWAYS**
+
+The `CLAUDE.md` file in the project root is the **PRIMARY GUIDELINE DOCUMENT** for this project. All work must be based on this file.
+
+## Mandatory Requirements
+
+1. **Before any task**: Read and understand `CLAUDE.md` thoroughly
+2. **Architecture decisions**: Must follow the architecture defined in `CLAUDE.md`
+3. **Commands and workflows**: Use only the commands documented in `CLAUDE.md`
+4. **Naming conventions**: Follow the naming patterns specified in `CLAUDE.md`
+5. **Module responsibilities**: Respect the module boundaries defined in `CLAUDE.md`
+
+## File Priority
+
+When there are conflicts or questions, follow this priority:
+
+```
+CLAUDE.md > README.md > 技術手冊.md > Other documentation
+```
+
+## Key Architecture Principles (from CLAUDE.md)
+
+- **Dynamic Configuration**: All config via BigQuery `backup_config` and `field_mappings` tables
+- **Dual Execution Mode**: Cloud Function (production) + Manual CLI tools (dev/testing)
+- **Three-Layer Field Mapping**: Python hardcoded → BigQuery dynamic → Auto pinyin conversion
+- **Taipei Timezone**: All time handling uses `Asia/Taipei`, never UTC
+- **Incremental Backup**: Based on `sheet_sync_state` table in BigQuery
+
+## Development Rules
+
+- **Do NOT** create new architecture patterns not documented in `CLAUDE.md`
+- **Do NOT** bypass the three-layer field mapping system
+- **Do NOT** use UTC timezone for any time operations
+- **Do NOT** modify core modules without updating `CLAUDE.md`
+- **ALWAYS** use the deployment scripts in `scripts/` directory
+- **ALWAYS** reference the exact commands from `CLAUDE.md`
+
+## 🔄 MANDATORY: Update CLAUDE.md Before Making Changes
+
+**CRITICAL RULE**: Before making any architectural, module, or process changes, you **MUST** update `CLAUDE.md` first.
+
+### When to Update CLAUDE.md (MANDATORY)
+
+Update CLAUDE.md **BEFORE** implementing changes in these cases:
+
+- ✅ Adding or modifying core modules (e.g., new `xxx_client.py`)
+- ✅ Changing architectural patterns (e.g., adding third execution mode)
+- ✅ Modifying configuration system (e.g., adding new config source)
+- ✅ Changing key workflows (e.g., modifying upload strategy)
+- ✅ Adding or modifying deployment methods (e.g., new deployment script)
+- ✅ Modifying timezone or time handling logic
+- ✅ Changing field mapping system
+- ✅ Adding or modifying environment variables
+- ✅ Modifying test strategy or test tools
+
+### Update Process
+
+```
+1. Update CLAUDE.md first (document change and rationale)
+2. Implement code changes
+3. Sync other documentation (README.md, tech manuals)
+4. Include CLAUDE.md update in the same commit
+```
+
+**If you attempt to make changes without updating CLAUDE.md first, STOP and update CLAUDE.md.**
+
+## Testing
+
+All tests must be placed in the `test/` directory (gitignored). Refer to `CLAUDE.md` section "測試與診斷" for available test scripts.
+
+## When Updating Architecture
+
+If you make any architectural changes:
+
+1. Update `CLAUDE.md` FIRST
+2. Then implement the changes
+3. Update other documentation as needed
+4. Maintain consistency across all AI tool guideline files
+
+---
+
+**Remember**: CLAUDE.md is the source of truth. When in doubt, check CLAUDE.md.

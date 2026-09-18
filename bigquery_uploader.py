@@ -234,11 +234,20 @@ class BigQueryUploader:
     def _project_records_to_schema(self, data: List[Dict[str, Any]], schema: List[bigquery.SchemaField]) -> List[Dict[str, Any]]:
         """
         僅保留 schema 中定義的欄位，避免 BigQuery 載入時出現未知欄位錯誤
+        同時將 datetime 物件轉換為 ISO 格式字串，確保 JSON 序列化正常
         """
+        from datetime import datetime as dt
         allowed = {f.name for f in schema}
         projected: List[Dict[str, Any]] = []
         for rec in data:
-            filtered = {k: v for k, v in rec.items() if k in allowed}
+            filtered = {}
+            for k, v in rec.items():
+                if k not in allowed:
+                    continue
+                # 將 datetime 物件轉換為 ISO 格式字串
+                if isinstance(v, dt):
+                    v = v.isoformat()
+                filtered[k] = v
             projected.append(filtered)
         return projected
 
@@ -310,10 +319,18 @@ class BigQueryUploader:
         existing_staging_schema = self._get_existing_table_schema(staging_table_ref) or staging_schema
 
         # 附加批次欄位並投影到 schema（排除未知欄位如 _ragicId 等）
+        # 同時將 datetime 物件轉換為 ISO 格式字串
         payload = []
         allowed_fields = {f.name for f in existing_staging_schema}
         for item in data:
-            enriched = {k: v for k, v in item.items() if k in allowed_fields}
+            enriched = {}
+            for k, v in item.items():
+                if k not in allowed_fields:
+                    continue
+                # 將 datetime 物件轉換為 ISO 格式字串
+                if isinstance(v, datetime.datetime):
+                    v = v.isoformat()
+                enriched[k] = v
             enriched['batch_id'] = batch_id
             enriched['ingested_at'] = ingested_at
             payload.append(enriched)

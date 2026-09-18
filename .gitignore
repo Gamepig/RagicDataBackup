@@ -133,3 +133,29 @@ function_trigger_output.txt
 redeploy_out.txt
 upload_99_log.txt
 *.pdf
+
+# Secrets (never commit)
+.env
+.env.*
+env_vars.yaml
+*sa-key.json
+*-key.json
+*credentials*.json
+
+# Local data / logs / outputs
+.data/
+.cache/
+.code-summary/
+.serena/
+documents/
+*.log
+deploy_*.txt
+redeploy_out.txt
+*_output.txt
+upload_*_log.txt
+schema.json
+.deploy_nudge_*.txt
+
+# macOS / editor
+.DS_Store
+scripts/logs/

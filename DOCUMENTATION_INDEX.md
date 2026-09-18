@@ -13,7 +13,7 @@
 |-----|------|---------|
 | [README.md](README.md) | 專案總覽與快速開始指南 | 所有人 ⭐ |
 | [操作手冊.md](操作手冊.md) | 一鍵部署、驗證、排程與常見問題 | 非技術使用者 |
-| [技術手冊.md](技術手冊.md) | 模組/函數/變數詳解與部署重點 | 技術維運 |
+| [技術手冊.md](技術手冊.md) | 模組/函式/變數詳解與部署重點 | 技術維運 |
 | [FIELD_MAPPING_SOLUTION.md](FIELD_MAPPING_SOLUTION.md) | 欄位對照表完整解決方案 | 開發者 ⭐ |
 | [test/BACKUP_GUIDE.md](test/BACKUP_GUIDE.md) | Ragic 完整備份操作指南 | 操作人員 ⭐ |
 
@@ -33,7 +33,7 @@
 #### 欄位對照表解決方案
 - **[FIELD_MAPPING_SOLUTION.md](FIELD_MAPPING_SOLUTION.md)** ⭐ 重要
   - 問題背景：Cloud Function 環境限制
-  - 三層配置策略詳解（硬編碼 + BigQuery + 自動轉換）
+  - 三層設定策略詳解（硬編碼 + BigQuery + 自動轉換）
   - 完整實作細節與程式碼範例
   - 維護流程與未來 AI 自動化計劃
   - 常見問題排查
@@ -44,7 +44,7 @@
 - **[test/BACKUP_GUIDE.md](test/BACKUP_GUIDE.md)**
   - 漸進式斷點續傳備份方式
   - 自動化腳本使用說明
-  - 9 個表單配置與預估時間
+  - 9 個表單設定與預估時間
   - 檔案結構與進度管理
 
 #### 測試報告
@@ -125,7 +125,7 @@
 - **[documents/CloudFunctionGrok.md](documents/CloudFunctionGrok.md)** ⭐ 推薦
   - Cloud Function 完整部署步驟
   - 環境變數設定
-  - 逾時與記憶體配置
+  - 逾時與記憶體設定
   - 測試與監控
 
 - **[documents/CloudFunctionChatGPT.md](documents/CloudFunctionChatGPT.md)**
@@ -135,20 +135,20 @@
 - **[操作手冊.md](操作手冊.md)** ⭐ 建議先讀
   - 非技術人員用：一鍵部署、驗證、排程與常見問題
 - **[技術手冊.md](技術手冊.md)**
-  - 技術維運用：模組/函數/變數詳解、增量策略、部署重點
+  - 技術維運用：模組/函式/變數詳解、增量策略、部署重點
 
 ### 6️⃣ BigQuery 相關
 
-#### BigQuery 配置表建立
+#### BigQuery 設定資料表建立
 - **[sql/setup_bigquery_config_tables.sql](sql/setup_bigquery_config_tables.sql)** ⭐ 重要
-  - 建立 3 個配置表（backup_config、field_mappings、unknown_fields）
+  - 建立 3 個設定資料表（backup_config、field_mappings、unknown_fields）
   - 插入 9 個表單初始資料
   - 索引與驗證 SQL
   - 常用維護 SQL
 
 - **[sql/create_staging_table.sql](sql/create_staging_table.sql)** ⭐ 新增
   - 建立 `<TABLE>_staging` 表，附加 `batch_id`、`ingested_at`
-  - 建議沿用目標表分區與叢集設定（`DATE(updated_at)` / `CLUSTER BY order_id`）
+  - 建議沿用目標資料表分區與叢集設定（`DATE(updated_at)` / `CLUSTER BY order_id`）
 
 - **[sql/create_merge_sp.sql](sql/create_merge_sp.sql)** ⭐ 新增
   - 預儲程序 `sp_upsert_ragic_data(batch_id)`
@@ -186,7 +186,7 @@
 
 這些文件位於 `.gitignore` 排除清單中：
 
-- **CLAUDE.md** - Claude Code Agent 配置
+- **CLAUDE.md** - Claude Code Agent 設定
 - **Tasks.md** - 專案任務清單
 - **.claude/memory/** - Claude 記憶檔案
 - **test/** 資料夾 - 測試腳本與備份資料
@@ -206,7 +206,7 @@
 2. [test/BACKUP_GUIDE.md](test/BACKUP_GUIDE.md) - 備份操作指南
 3. [FIELD_MAPPING_SOLUTION.md](FIELD_MAPPING_SOLUTION.md) - 欄位對照表解決方案
 
-### 階段三：配置管理
+### 階段三：設定管理
 1. [sql/setup_bigquery_config_tables.sql](sql/setup_bigquery_config_tables.sql) - BigQuery 配置
 2. [documents/field_mapping_master.json](documents/field_mapping_master.json) - 欄位對照表
 3. [documents/field_mapping_README.md](documents/field_mapping_README.md) - 使用指南

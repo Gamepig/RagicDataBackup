@@ -8,6 +8,7 @@ import logging
 import hashlib
 from typing import Dict, Optional, Tuple
 from google.cloud import bigquery
+from google.api_core.retry import Retry
 from pypinyin import lazy_pinyin
 
 # ============================================================================
@@ -256,7 +257,13 @@ class DynamicFieldMapper:
                 ]
             )
 
-            results = self.client.query(query, job_config=job_config).result()
+            # 為動態對照查詢加入傳輸層 timeout 與 API Retry
+            results = self.client.query(
+                query,
+                job_config=job_config,
+                timeout=120,
+                retry=Retry(deadline=180)
+            ).result(timeout=180)
             mappings = {row.chinese_field: row.english_field for row in results}
 
             # 更新快取
@@ -294,7 +301,13 @@ class DynamicFieldMapper:
                 ]
             )
 
-            self.client.query(query, job_config=job_config)
+            # 寫入未知欄位記錄時也加入 timeout / retry，避免網路抖動放大
+            self.client.query(
+                query,
+                job_config=job_config,
+                timeout=120,
+                retry=Retry(deadline=180)
+            )
             logging.info(f"記錄未知欄位: {chinese_field} → {temp_english}")
 
         except Exception as e:

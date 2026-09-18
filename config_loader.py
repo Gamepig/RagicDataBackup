@@ -10,6 +10,7 @@
 import logging
 from typing import List, Dict, Any, Optional
 from google.cloud import bigquery
+from google.api_core.retry import Retry
 
 
 class BackupConfigLoader:
@@ -91,7 +92,13 @@ class BackupConfigLoader:
 
             # 執行查詢
             logging.info(f"從 BigQuery 載入備份配置（客戶：{client_id}，僅啟用：{enabled_only}）")
-            results = self.client.query(query, job_config=job_config).result()
+            # 加入傳輸層 timeout 與 API 層 Retry，避免偶發逾時擴大
+            results = self.client.query(
+                query,
+                job_config=job_config,
+                timeout=120,
+                retry=Retry(deadline=180)
+            ).result(timeout=180)
 
             # 轉換為列表
             config_list = []

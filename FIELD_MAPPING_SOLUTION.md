@@ -2,7 +2,7 @@
 
 > 📅 **最後更新**：2025-10-02
 > 🎯 **問題**：Cloud Function 環境下的欄位對照表維護
-> ✅ **解決方案**：三層配置策略 + 自動容錯機制
+> ✅ **解決方案**：三層設定策略 + 自動容錯機制
 
 ---
 
@@ -47,7 +47,7 @@
 |-----|---------------------|----------|------|
 | JSON 檔案 | ❌ 需重新部署 | ⚠️ 中等 | ✅ 良好 |
 | Python 硬編碼 | ❌ 需重新部署 | ❌ 差 | ✅ 最佳 |
-| BigQuery 配置表 | ✅ 無需部署 | ✅ 最佳 | ⚠️ 有延遲 |
+| BigQuery 設定資料表 | ✅ 無需部署 | ✅ 最佳 | ⚠️ 有延遲 |
 
 ### Challenge 2: 欄位變更偵測
 
@@ -65,7 +65,7 @@
 
 ## 解決方案架構
 
-### 三層配置策略
+### 三層設定策略
 
 ```
 ┌──────────────────────────────────────────────────────────┐
@@ -122,10 +122,10 @@ graph TD
 
 ```
 RagicDataBackup/
-├── config_field_mapping.py          # ⭐ 三層配置策略核心模組
+├── config_field_mapping.py          # ⭐ 三層設定策略核心模組
 ├── data_transformer.py              # 資料轉換模組（需整合）
 ├── sql/
-│   └── setup_bigquery_config_tables.sql  # ⭐ BigQuery 配置表建立腳本
+│   └── setup_bigquery_config_tables.sql  # ⭐ BigQuery 設定資料表建立腳本
 ├── documents/
 │   ├── field_mapping_master.json    # 完整對照表（參考用）
 │   └── field_mapping_*.md           # 說明文件
@@ -183,7 +183,7 @@ from config_field_mapping import DynamicFieldMapper, get_field_mapping
 # 建立動態對照管理器
 mapper = DynamicFieldMapper(project_id="grefun-testing", use_dynamic=True)
 
-# 獲取完整對照表（Layer 1 + Layer 2 合併）
+# 取得完整對照表（Layer 1 + Layer 2 合併）
 mappings = get_field_mapping(sheet_code="99", dynamic_mapper=mapper)
 ```
 
